@@ -38,6 +38,13 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.agents\skills" -Target 'D:\
 
 junction 对 Node 完全透明：provider 照常 `readdir`、chokidar 照常监视，模型拿到的名字与正文不变，只是字节落在 D 盘。删除联接不影响 D 盘内容：`Remove-Item <junction>` 只删链接。
 
+同一件事也写成了脚本（幂等，重复运行只报告状态）：
+
+```powershell
+.\scripts\relocate-to-d.ps1                       # 默认 C:\Users\<you>\.agents\skills -> D:\dsh\skills
+.\scripts\relocate-to-d.ps1 -Target 'E:\dsh\skills'
+```
+
 **skill：默认装到 D 盘。** 面板「安装地址」预填 `installRoot`：
 
 ```yaml
