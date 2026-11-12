@@ -23,7 +23,7 @@
 | 安装 | 在「安装地址」那个目录下写 `<name>/SKILL.md`（name 必须 kebab-case，description 必填）；也可以填绝对路径，把已有目录/文件整体导入 |
 | 禁用 | 把条目移进同根的 `.disabled/`（该目录不在发现深度内，skill 立刻从目录消失） |
 | 启用 | 从 `.disabled/` 移回根目录 |
-| 删除 | 删除磁盘上的目录/文件；不在扫描根里的条目用「按路径删除」 |
+| 删除 | 删除磁盘上的目录/文件；不在扫描根里的条目用「按路径删除」（仍然只允许删已知根内的路径，见下） |
 
 ### 拖入安装（文件夹 / SKILL.md / zip）
 
@@ -41,8 +41,10 @@
 - 目录名取 `name` → frontmatter 的 `name` → 外层目录名，统一 slug 成 kebab-case。
 - 缺 `description` 会补一句占位描述并给出 warning（否则 provider 会静默丢弃该 skill），请事后改成真实描述。
 - 拒绝 `..`、绝对路径、盘符路径；`.git/`、`__MACOSX/`、`.DS_Store`、`Thumbs.db` 直接忽略。
-- 上限：单次 12 MB / 400 个文件；zip64 不支持。
+- 上限：单次 12 MB / 400 个文件；zip64 不支持。请求体上限按 base64 反推为 17 MB，超过返回 `请求体过大（上限 17 MB）`——导入上限和 body 上限必须一起动，否则 12 MB 就是摆设。
+- 带 BOM 的 `SKILL.md`（记事本、PowerShell 5.1 会写）按正常文件处理：读入先剥 BOM，不会误报「缺 name/description」，也不会写出双份 frontmatter。
 - 目标已存在时要显式覆盖（面板走同一接口时由后端拒绝并回传原因）。
+- 删除护栏：`按路径删除` 只接受落在已知 skill 根（两个默认根、`customSkillDirs`、`extraRoots`、`installRoot`）内的路径；根目录本身与根下的 `.disabled/` 本身直接拒绝。
 - 也可以不经拖放：虚线框里的「选择文件夹」「选择文件 / zip」按钮走同一套逻辑。
 
 ### 操作反馈
@@ -56,6 +58,12 @@
 | 对话框右上角 toast | 所有操作共用：成功绿勾、失败红叉加原因，6 秒自动消失，可手动关闭 |
 
 拖放导入同样如此（`已导入 xxx（N 个文件）→ 路径`），MCP 的添加/启停/删除也都有 toast。`description` 缺失这类 warning 仍旧停在黄色提示条里，因为它需要你事后改文件，不该跟着 toast 消失。
+
+### 「启用中」不等于模型看得见
+
+发现与否由 `dsh-skill-filesystem` 决定，它有三条硬规则：frontmatter 必须有 `name` 与 `description`，`disable-model-invocation: true` 的条目不会进入模型目录。面板解析这三项，命中任一条就在该行打黄色「模型不可见」徽标，并在下面写出原因（例：`disable-model-invocation: true`）。`user-invocable: false` 只影响用户侧入口，单独记录、不触发徽标。
+
+现成例子：`grill-me` 就是 `disable-model-invocation: true` —— 面板里在，模型目录里没有。
 
 ### 把 skill / MCP 放到 D 盘
 
@@ -160,7 +168,7 @@ POST /skill-mcp-manager/action
 { "domain": "mcp", "op": "delete",  "serverName": "github" }
 ```
 
-失败一律 `400` + `{ "ok": false, "error": "原因" }`，成功返回 `{ "ok": true, "result": …, …最新快照 }`。
+失败一律 `400` + `{ "ok": false, "error": "原因" }`，成功返回 `{ "ok": true, "result": …, …最新快照 }`。快照里的 `mcp.consistent` 与 `mcp.blockServers` 用来提示「state 期望的服务器」和「patch 段落里真实存在的服务器」是否一致，面板据此在顶部标黄。
 
 ## 设计取舍
 
@@ -168,6 +176,18 @@ POST /skill-mcp-manager/action
 - **MCP 行只归本管理器所有。** profile patch 里其它条目一律不动，重写范围严格限制在受管段落内；段落清空后整段删除，不留空标记。
 - **profile 目录靠自证定位。** `DSH_PROFILE_DIR` 只存在于 shell 环境；拿不到时依次尝试 `profileContext`、再按「哪个 profile 的 `node_modules/dsh-skill-mcp-manager` 指向本包」反查，所以不需要用户填路径。
 - **面板不 import 任何 Harness Client 包。** 只用 `require('react')` 与 `--dsw-alias-*` 主题令牌，避免版本升级把面板打空。
+- **删除要有边界。** 按路径删除是唯一能删到扫描根外的口子，也最容易一误删全库；所以校验放在 Host：路径必须落在已知根内，根本身与 `.disabled/` 本身直接拒绝。前端只负责二次确认，不承担判断。
+- **写操作串行，读的时候对账。** state 与 patch 是两份文件，读-改-写不能并发，路由层用一条 promise 链把动作排队；读快照时顺手解析段落里的 `serverName` 与 state 比对，不一致就报出来，而不是假装没事。
+
+## 测试
+
+```powershell
+npm test     # node --test，26 个用例，零第三方依赖
+```
+
+- `test/units.test.mjs`：直接打 `lib/index.js` 暴露的 `__test__` 纯函数 —— BOM 剥离、frontmatter 解析/补齐、条目路径规范化、zip 解析（store + deflate）、外层剥壳、删除护栏、受管段落解析。
+- `test/http.test.mjs`：假 `webServer` 收路由 + 真 `node:http` 发请求，走完整接口 —— 导入（含 BOM 包与 >256 KB 的包）、body 上限、删除护栏、skill 启停、MCP 增删启停、patch 外来行保留、state/patch 漂移检测。
+- `test-support/zip.mjs`：自带的极简 zip 写入器，用来造夹具，不参与测试发现。
 
 ## 卸载
 

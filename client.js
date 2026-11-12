@@ -246,14 +246,17 @@ window.__ModuleLoader__.load({
         color: kind === 'error' ? colors.danger : colors.muted,
         background: colors.base,
       }),
-      pill: kind => ({
-        fontSize: '10px',
-        padding: '1px 6px',
-        borderRadius: '999px',
-        border: `1px solid ${kind === 'on' ? colors.success : colors.idle}`,
-        color: kind === 'on' ? colors.success : colors.muted,
-        fontWeight: 500,
-      }),
+      pill: kind => {
+        const tone = kind === 'on' ? colors.success : kind === 'warn' ? colors.warn : colors.idle
+        return {
+          fontSize: '10px',
+          padding: '1px 6px',
+          borderRadius: '999px',
+          border: `1px solid ${tone}`,
+          color: kind === 'off' ? colors.muted : tone,
+          fontWeight: 500,
+        }
+      },
       footer: {
         display: 'flex',
         alignItems: 'center',
@@ -361,8 +364,14 @@ window.__ModuleLoader__.load({
             { style: s.rowName },
             skill.name,
             h('span', { style: s.pill(skill.disabled ? 'off' : 'on') }, skill.disabled ? '已禁用' : '启用中'),
+            skill.modelVisible === false
+              ? h('span', { style: s.pill('warn'), title: skill.modelInvisibleReason || '' }, '模型不可见')
+              : null,
           ),
           skill.description ? h('div', { style: s.rowDesc }, skill.description) : null,
+          skill.modelVisible === false && skill.modelInvisibleReason
+            ? h('div', { style: { ...s.label, color: colors.warn } }, `模型不可见：${skill.modelInvisibleReason}`)
+            : null,
           h('div', { style: s.rowPath, title: skill.path }, skill.path),
           skill.realPath && skill.realPath !== skill.path
             ? h('div', { style: s.rowPath, title: skill.realPath }, `→ ${skill.realPath}`)
@@ -861,9 +870,17 @@ window.__ModuleLoader__.load({
 
     function McpTab({ snapshot, busy, run }) {
       const mcp = (snapshot && snapshot.mcp) || { servers: [], patchPath: null }
+      const expected = mcp.servers.filter(server => server.enabled !== false).map(server => server.serverName)
       return h(
         React.Fragment,
         null,
+        mcp.consistent === false
+          ? h(
+              'div',
+              { style: { ...s.banner(), color: colors.warn, borderColor: colors.warn } },
+              `状态与 patch 不一致：状态期望 [${expected.join(', ') || '空'}]，patch 受管段落里是 [${(mcp.blockServers || []).join(', ') || '空'}]。对任一服务器做一次启用/禁用即可重写段落。`,
+            )
+          : null,
         h('div', { style: s.sectionTitle }, '服务器', h('span', { style: s.count }, String(mcp.servers.length))),
         mcp.servers.length === 0
           ? h('div', { style: s.banner() }, '还没有由本面板管理的 MCP 服务器。')
