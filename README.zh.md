@@ -16,7 +16,9 @@
 
 ## 四个操作分别落到哪
 
-**skill**（扫描根 = `$DSH_HOME/skills`、`$DSH_AGENTS_HOME/skills`，外加配置里的 `customSkillDirs`）
+**skill**（扫描根 = 项目根、`customSkillDirs`、`$DSH_HOME/skills`、`$DSH_AGENTS_HOME/skills`，按 provider 的优先级排列）
+
+项目根指 `<project>/.dsh/skills` 与 `<project>/.agents/skills`。Host 插件自己没有 cwd，所以不猜 `process.cwd()`：目录来自两处 —— 配置里的 `projectRoots`，以及 GUI 已经在维护的**工作区注册表**（`ctx.workspaceRegistry`）。注册表可能登记几十个项目，每个贡献两个根，所以自动探测只取最近 12 个（`projectRoots` 里显式写的不受限）；不存在的项目根不会出现在「安装地址」按钮里，但只要你手工指定路径，`scanned` 判定仍然认它。项目内的 skill 行会带一个灰色「项目」徽标 —— 它只在该项目目录下启动的会话里可见。
 
 | 操作 | 实际动作 |
 |---|---|
@@ -93,6 +95,7 @@ junction 对 Node 完全透明：provider 照常 `readdir`、chokidar 照常监�
     installRoot: 'D:\dsh\skills'
     mcpRoot: 'D:\dsh\mcp'
     extraRoots: []          # 可选：更多快捷选择目录
+    projectRoots: []        # 可选：显式补充项目根，如 ['D:\AI_RPG_engine']
 ```
 
 单次覆盖：安装表单里的「安装地址」；不在扫描根里的目录会标黄并说明「文件写进去了但不会被加载」。
@@ -117,11 +120,12 @@ junction 对 Node 完全透明：provider 照常 `readdir`、chokidar 照常监�
 
 仓库里带了一个零依赖示例服务器 [`examples/demo-local/server.mjs`](examples/demo-local/server.mjs)（`ping` / `where` 两个工具，`where` 返回自己的工作目录）。运行时副本放在 `D:\dsh\mcp\demo-local\server.mjs`，已作为 `demo-local` 注册在面板里，可直接验证「进程在 D 盘、DSH 正常调用」。
 
-**MCP**（状态存在 `$DSH_HOME/skill-mcp-manager/state.json`）
+**MCP**（状态存在 `<profile>/skill-mcp-manager/state.json`，旧版 `$DSH_HOME/skill-mcp-manager/state.json` 只读兜底）
 
 | 操作 | 实际动作 |
 |---|---|
 | 安装 | 往 profile 的 `cordis.patch.yml` 里重写受管段落，插一行 `@deepseek-ai/dsh-mcp-client` |
+| 编辑 | 面板行上的「编辑」把该服务器灌回表单，保存时走 `update`：重写同一行，名字锁死（改名＝删掉重建） |
 | 禁用 | 从受管段落里移除该行 |
 | 启用 | 重新写入该行 |
 | 删除 | 从状态里删掉并重写段落；服务器清零时整段移除，patch 文件恢复原样 |
@@ -162,13 +166,16 @@ POST /skill-mcp-manager/action
   "command": "npx", "args": "-y\n@modelcontextprotocol/server-github", "env": "GITHUB_TOKEN=xxx" }
 { "domain": "mcp", "op": "add", "serverName": "remote", "transport": "streamable-http",
   "url": "http://127.0.0.1:3000/mcp", "headers": "Authorization=Bearer xxx" }
+// 编辑（serverName 是定位键，不能在这条请求里改名；远端服务器可改 url / headers）
+{ "domain": "mcp", "op": "update", "serverName": "remote", "transport": "streamable-http",
+  "url": "http://127.0.0.1:3000/mcp", "headers": "Authorization=Bearer yyy" }
 // 开关 / 删除
 { "domain": "mcp", "op": "disable", "serverName": "github" }
 { "domain": "mcp", "op": "enable",  "serverName": "github" }
 { "domain": "mcp", "op": "delete",  "serverName": "github" }
 ```
 
-失败一律 `400` + `{ "ok": false, "error": "原因" }`，成功返回 `{ "ok": true, "result": …, …最新快照 }`。快照里的 `mcp.consistent` 与 `mcp.blockServers` 用来提示「state 期望的服务器」和「patch 段落里真实存在的服务器」是否一致，面板据此在顶部标黄。
+失败一律 `400` + `{ "ok": false, "error": "原因" }`，成功返回 `{ "ok": true, "result": …, …最新快照 }`。快照里的 `mcp.consistent` 与 `mcp.blockServers` 用来提示「state 期望的服务器」和「patch 段落里真实存在的服务器」是否一致，面板据此在顶部标黄；`mcp.statePath` 告诉你当前 profile 的状态文件落在哪。
 
 ## 设计取舍
 
@@ -178,15 +185,17 @@ POST /skill-mcp-manager/action
 - **面板不 import 任何 Harness Client 包。** 只用 `require('react')` 与 `--dsw-alias-*` 主题令牌，避免版本升级把面板打空。
 - **删除要有边界。** 按路径删除是唯一能删到扫描根外的口子，也最容易一误删全库；所以校验放在 Host：路径必须落在已知根内，根本身与 `.disabled/` 本身直接拒绝。前端只负责二次确认，不承担判断。
 - **写操作串行，读的时候对账。** state 与 patch 是两份文件，读-改-写不能并发，路由层用一条 promise 链把动作排队；读快照时顺手解析段落里的 `serverName` 与 state 比对，不一致就报出来，而不是假装没事。
+- **项目根不猜 cwd。** provider 按每个 agent 的 cwd 扫 `<project>/.dsh/skills` 与 `<project>/.agents/skills`，Host 插件没有 cwd；用 `process.cwd()` 猜会把无关目录标成「扫描根」。所以只认两个来源：配置里的 `projectRoots` 和 `ctx.workspaceRegistry` 里登记的项目，且自动探测封顶 12 个（每个项目两个根）。
+- **state 跟着 profile 走。** 受管段落写进哪个 profile，服务器清单就该住在哪个 profile；共用 `$DSH_HOME` 一份文件时，两个 profile 会互相覆盖。旧文件保留为只读兜底，首个写操作之后自然迁移到 profile 下。
 
 ## 测试
 
 ```powershell
-npm test     # node --test，26 个用例，零第三方依赖
+npm test     # node --test，32 个用例，零第三方依赖
 ```
 
-- `test/units.test.mjs`：直接打 `lib/index.js` 暴露的 `__test__` 纯函数 —— BOM 剥离、frontmatter 解析/补齐、条目路径规范化、zip 解析（store + deflate）、外层剥壳、删除护栏、受管段落解析。
-- `test/http.test.mjs`：假 `webServer` 收路由 + 真 `node:http` 发请求，走完整接口 —— 导入（含 BOM 包与 >256 KB 的包）、body 上限、删除护栏、skill 启停、MCP 增删启停、patch 外来行保留、state/patch 漂移检测。
+- `test/units.test.mjs`：直接打 `lib/index.js` 暴露的 `__test__` 纯函数 —— BOM 剥离、frontmatter 解析/补齐、条目路径规范化、zip 解析（store + deflate）、外层剥壳、删除护栏、根序与项目根、受管段落解析。
+- `test/http.test.mjs`：假 `webServer` 收路由 + 真 `node:http` 发请求，走完整接口 —— 导入（含 BOM 包与 >256 KB 的包）、body 上限、删除护栏、skill 启停、项目根扫描与「项目」标记、MCP 增删启停与 `update`（含 headers 渲染）、patch 外来行保留、state/patch 漂移检测、按 profile 隔离的 state。
 - `test-support/zip.mjs`：自带的极简 zip 写入器，用来造夹具，不参与测试发现。
 
 ## 卸载

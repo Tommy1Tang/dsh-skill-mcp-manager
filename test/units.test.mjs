@@ -166,6 +166,25 @@ test('knownSkillRoots covers the defaults, custom roots, and installRoot', () =>
   assert.ok(roots.some(root => root === join(sandbox, 'install')))
 })
 
+test('skillRoots puts project roots first, then custom, then the user homes', () => {
+  const projectDir = join(sandbox, 'proj')
+  const roots = T.skillRoots({ projectRoots: [projectDir], customSkillDirs: [join(sandbox, 'custom2')] })
+  assert.deepEqual(roots.map(root => root.source), [
+    'project-dsh',
+    'project-agents',
+    'custom',
+    'user-dsh',
+    'user-agents',
+  ])
+  assert.equal(roots[0].dir, join(projectDir, '.dsh', 'skills'))
+  assert.equal(roots[1].dir, join(projectDir, '.agents', 'skills'))
+})
+
+test('configuredProjectDirs keeps every explicit root', () => {
+  const explicit = Array.from({ length: 20 }, (_, index) => join(sandbox, `explicit-${index}`))
+  assert.equal(T.configuredProjectDirs({ projectRoots: explicit }).length, 20)
+})
+
 test('blockServerNames reads only the managed block', () => {
   const patch = [
     '# hand written',

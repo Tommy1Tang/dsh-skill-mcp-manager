@@ -38,8 +38,9 @@ await fs.mkdir(process.env.DSH_PROFILE_DIR, { recursive: true })
 await fs.writeFile(patchFile, foreignPatch, 'utf8')
 
 const routes = []
+let workspaceRegistry = null
 const ctx = {
-  get: () => undefined,
+  get: name => (name === 'workspaceRegistry' ? workspaceRegistry : undefined),
   effect(fn) {
     const dispose = fn()
     return typeof dispose === 'function' ? dispose : () => {}
@@ -103,7 +104,7 @@ test('GET /state reports roots, install target, and patch location', async () =>
   assert.equal(body.mcp.patchPath, patchFile)
   assert.equal(body.mcp.consistent, true)
   const sources = body.skills.roots.map(root => root.source)
-  assert.deepEqual(sources, ['user-dsh', 'user-agents', 'custom'])
+  assert.deepEqual(sources, ['custom', 'user-dsh', 'user-agents'])
 })
 
 test('import keeps a BOM-authored frontmatter intact', async () => {
@@ -295,6 +296,164 @@ test('state that drifts from the patch is reported instead of hidden', async () 
   assert.equal(cleaned.body.mcp.consistent, true)
   const patch = await readPatch()
   assert.equal(patch.trim(), foreignPatch.trim())
+})
+
+test('update rewrites a server in place and renders headers', async () => {
+  const added = await act({
+    domain: 'mcp',
+    op: 'add',
+    serverName: 'http-mcp',
+    transport: 'streamable-http',
+    url: 'http://127.0.0.1:3100/mcp',
+    headers: 'Authorization=Bearer first\nX-Tenant=alpha',
+  })
+  assert.equal(added.status, 200)
+  let patch = await readPatch()
+  assert.ok(patch.includes("url: 'http://127.0.0.1:3100/mcp'"))
+  assert.ok(patch.includes('headers:'))
+  assert.ok(patch.includes("Authorization: 'Bearer first'"))
+
+  const updated = await act({
+    domain: 'mcp',
+    op: 'update',
+    serverName: 'http-mcp',
+    transport: 'streamable-http',
+    url: 'http://127.0.0.1:3200/mcp',
+    headers: 'Authorization=Bearer second',
+  })
+  assert.equal(updated.status, 200)
+  patch = await readPatch()
+  assert.ok(!patch.includes('3100'), 'the old URL must not linger')
+  assert.ok(patch.includes("url: 'http://127.0.0.1:3200/mcp'"))
+  assert.ok(patch.includes("Authorization: 'Bearer second'"))
+  assert.ok(!patch.includes('X-Tenant'), 'replaced headers must not linger')
+
+  const stdio = await act({ domain: 'mcp', op: 'add', serverName: 'edit-stdio', transport: 'stdio', command: 'node', args: 'a.mjs' })
+  assert.equal(stdio.status, 200)
+  const stdioUpdate = await act({
+    domain: 'mcp',
+    op: 'update',
+    serverName: 'edit-stdio',
+    transport: 'stdio',
+    command: 'node',
+    args: 'b.mjs\n--flag',
+    env: 'MODE=edit',
+  })
+  assert.equal(stdioUpdate.status, 200)
+  patch = await readPatch()
+  assert.ok(patch.includes("- 'b.mjs'"))
+  assert.ok(patch.includes("- '--flag'"))
+  assert.ok(patch.includes("MODE: 'edit'"))
+
+  const missing = await act({ domain: 'mcp', op: 'update', serverName: 'nope', transport: 'stdio', command: 'node' })
+  assert.equal(missing.status, 400)
+  assert.match(missing.body.error, /找不到 MCP 服务器/)
+
+  await act({ domain: 'mcp', op: 'delete', serverName: 'http-mcp' })
+  await act({ domain: 'mcp', op: 'delete', serverName: 'edit-stdio' })
+})
+
+test('project skill roots are scanned when the workspace registry lists them', async () => {
+  const projectDir = join(sandbox, 'project-one')
+  await fs.mkdir(join(projectDir, '.dsh', 'skills', 'proj-skill'), { recursive: true })
+  await fs.writeFile(
+    join(projectDir, '.dsh', 'skills', 'proj-skill', 'SKILL.md'),
+    '---\nname: proj-skill\ndescription: Project scoped.\n---\n',
+    'utf8',
+  )
+  await fs.mkdir(join(projectDir, '.agents', 'skills', 'proj-agent-skill'), { recursive: true })
+  await fs.writeFile(
+    join(projectDir, '.agents', 'skills', 'proj-agent-skill', 'SKILL.md'),
+    '---\nname: proj-agent-skill\ndescription: Project agents scoped.\n---\n',
+    'utf8',
+  )
+
+  workspaceRegistry = { list: () => [{ path: projectDir }] }
+  try {
+    const { body } = await getState()
+    assert.ok(body.projectRoots.includes(projectDir))
+    const sources = body.skills.roots.map(root => root.source)
+    assert.ok(sources.includes('project-dsh'))
+    assert.ok(sources.includes('project-agents'))
+    const names = body.skills.active.map(skill => skill.name)
+    assert.ok(names.includes('proj-skill'), 'project .dsh/skills is scanned')
+    assert.ok(names.includes('proj-agent-skill'), 'project .agents/skills is scanned')
+    assert.equal(body.skills.active.find(skill => skill.name === 'proj-skill').rootSource, 'project-dsh')
+
+    const targets = body.installTargets.map(target => `${target.source}:${target.dir}`)
+    assert.ok(targets.includes(`project-dsh:${join(projectDir, '.dsh', 'skills')}`))
+
+    const disabled = await act({ domain: 'skill', op: 'disable', name: 'proj-skill' })
+    assert.equal(disabled.status, 200)
+    assert.ok((await fs.stat(join(projectDir, '.dsh', 'skills', '.disabled', 'proj-skill'))).isDirectory())
+
+    const enabled = await act({ domain: 'skill', op: 'enable', name: 'proj-skill' })
+    assert.equal(enabled.status, 200)
+
+    const removed = await act({ domain: 'skill', op: 'delete', name: 'proj-skill' })
+    assert.equal(removed.status, 200)
+    await assert.rejects(fs.stat(join(projectDir, '.dsh', 'skills', 'proj-skill')))
+  } finally {
+    workspaceRegistry = null
+  }
+})
+
+test('MCP state is per profile', async () => {
+  const profileA = process.env.DSH_PROFILE_DIR
+  const profileB = join(sandbox, 'profile-b')
+  await fs.mkdir(profileB, { recursive: true })
+  await fs.writeFile(join(profileB, 'cordis.patch.yml'), foreignPatch, 'utf8')
+
+  const addedA = await act({ domain: 'mcp', op: 'add', serverName: 'only-a', transport: 'stdio', command: 'node' })
+  assert.equal(addedA.status, 200)
+  assert.equal(addedA.body.mcp.statePath, join(profileA, 'skill-mcp-manager', 'state.json'))
+
+  process.env.DSH_PROFILE_DIR = profileB
+  try {
+    const emptyB = await getState()
+    assert.deepEqual(emptyB.body.mcp.servers, [], 'profile B must not inherit profile A servers')
+    assert.equal(emptyB.body.mcp.statePath, join(profileB, 'skill-mcp-manager', 'state.json'))
+
+    const addedB = await act({ domain: 'mcp', op: 'add', serverName: 'only-b', transport: 'stdio', command: 'node' })
+    assert.equal(addedB.status, 200)
+    const patchB = await fs.readFile(join(profileB, 'cordis.patch.yml'), 'utf8')
+    assert.ok(patchB.includes("serverName: 'only-b'"))
+    assert.ok(!patchB.includes('only-a'))
+  } finally {
+    process.env.DSH_PROFILE_DIR = profileA
+  }
+
+  const back = await getState()
+  assert.deepEqual(back.body.mcp.servers.map(server => server.serverName), ['only-a'])
+  const patchA = await readPatch()
+  assert.ok(patchA.includes("serverName: 'only-a'"))
+  assert.ok(!patchA.includes('only-b'))
+
+  await act({ domain: 'mcp', op: 'delete', serverName: 'only-a' })
+  process.env.DSH_PROFILE_DIR = profileB
+  await act({ domain: 'mcp', op: 'delete', serverName: 'only-b' })
+  process.env.DSH_PROFILE_DIR = profileA
+})
+
+test('detected project roots are capped, explicit ones are not', async () => {
+  const dirs = Array.from({ length: 20 }, (_, index) => join(sandbox, `many-${index}`))
+  workspaceRegistry = { list: () => dirs.map(path => ({ path })) }
+  try {
+    const { body } = await getState()
+    assert.equal(body.projectRootsDetected, 20)
+    assert.equal(body.projectRoots.length, 12, 'detected roots are capped')
+    assert.deepEqual(body.projectRoots, dirs.slice(0, 12))
+    assert.ok(
+      !body.installTargets.some(target => target.dir.includes('many-')),
+      'a project without a skill directory is not offered as an install target',
+    )
+  } finally {
+    workspaceRegistry = null
+  }
+  // With the registry gone the detected list clears instead of going stale.
+  const after = await getState()
+  assert.deepEqual(after.body.projectRoots, [])
+  assert.equal(after.body.projectRootsDetected, 0)
 })
 
 test('unknown domains and operations answer 400 with a reason', async () => {

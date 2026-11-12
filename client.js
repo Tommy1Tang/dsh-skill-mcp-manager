@@ -367,6 +367,9 @@ window.__ModuleLoader__.load({
             skill.modelVisible === false
               ? h('span', { style: s.pill('warn'), title: skill.modelInvisibleReason || '' }, '模型不可见')
               : null,
+            skill.rootSource && skill.rootSource.startsWith('project-')
+              ? h('span', { style: s.pill('off'), title: '只在该项目目录下启动的会话里可见' }, '项目')
+              : null,
           ),
           skill.description ? h('div', { style: s.rowDesc }, skill.description) : null,
           skill.modelVisible === false && skill.modelInvisibleReason
@@ -685,6 +688,15 @@ window.__ModuleLoader__.load({
 
     function SkillsTab({ snapshot, busy, run, install }) {
       const skills = (snapshot && snapshot.skills) || { active: [], disabled: [], roots: [] }
+      // A machine can register dozens of workspaces; a full root dump would push
+      // the list off screen, so the banner shows the first few and counts the rest.
+      const rootLines = (skills.roots || []).map(root => `${root.dir}${root.exists ? '' : '（不存在）'}`)
+      const rootSummary = rootLines.length > 6
+        ? `${rootLines.slice(0, 6).join('  ·  ')}  ·  …共 ${rootLines.length} 个`
+        : rootLines.join('  ·  ')
+      const projectSummary = snapshot && snapshot.projectRootsDetected > 0
+        ? `项目根：已纳入 ${(snapshot.projectRoots || []).length} 个（工作区注册表 ${snapshot.projectRootsDetected} 个）`
+        : ''
       return h(
         React.Fragment,
         null,
@@ -735,9 +747,9 @@ window.__ModuleLoader__.load({
         h(PathDelete, { busy, run }),
         h(
           'div',
-          { style: s.banner() },
-          '扫描根：',
-          skills.roots.map(root => `${root.dir}${root.exists ? '' : '（不存在）'}`).join('  ·  '),
+          { style: s.banner(), title: rootLines.join('\n') },
+          `扫描根：${rootSummary}`,
+          projectSummary ? `  ·  ${projectSummary}` : '',
         ),
       )
     }
@@ -752,7 +764,7 @@ window.__ModuleLoader__.load({
       return server.url || ''
     }
 
-    function McpRow({ server, busy, run }) {
+    function McpRow({ server, busy, run, onEdit, onDelete }) {
       const [confirming, setConfirming] = useState(false)
       useEffect(() => {
         if (!confirming) return undefined
@@ -777,6 +789,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: s.actions },
+          h(Button, { busy, onClick: () => onEdit(server) }, '编辑'),
           h(
             Button,
             {
@@ -801,7 +814,7 @@ window.__ModuleLoader__.load({
                   setConfirming(true)
                   return
                 }
-                run({ domain: 'mcp', op: 'delete', serverName: server.serverName })
+                onDelete(server)
               },
             },
             confirming ? '确认删除' : '删除',
@@ -810,36 +823,90 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function AddMcp({ busy, run }) {
-      const [serverName, setServerName] = useState('')
-      const [transport, setTransport] = useState('stdio')
-      const [command, setCommand] = useState('npx')
-      const [args, setArgs] = useState('')
-      const [url, setUrl] = useState('')
-      const [env, setEnv] = useState('')
+    /** Render a `KEY=VALUE` record as the textarea text the form edits. */
+    function recordToLines(record) {
+      if (!record || typeof record !== 'object') return ''
+      return Object.entries(record).map(([key, value]) => `${key}=${value}`).join('\n')
+    }
+
+    /** Seed the form from a stored server, or from the add defaults. */
+    function serverToForm(server) {
+      if (!server) {
+        return { serverName: '', transport: 'stdio', command: 'npx', args: '', url: '', env: '', headers: '' }
+      }
+      return {
+        serverName: server.serverName || '',
+        transport: server.transport === 'streamable-http' ? 'streamable-http' : 'stdio',
+        command: server.command || '',
+        args: Array.isArray(server.args) ? server.args.join('\n') : '',
+        url: server.url || '',
+        env: recordToLines(server.env),
+        headers: recordToLines(server.headers),
+      }
+    }
+
+    /**
+     * One form for both add and update.
+     *
+     * `editing` decides the operation; the caller remounts it through `key`, so
+     * switching between servers never leaves a stale field behind. The server
+     * name is locked while editing because the state file is keyed by it —
+     * renaming is a delete plus an add.
+     */
+    function McpForm({ busy, run, editing, onDone, onCancel }) {
+      const initial = serverToForm(editing)
+      const [serverName, setServerName] = useState(initial.serverName)
+      const [transport, setTransport] = useState(initial.transport)
+      const [command, setCommand] = useState(initial.command)
+      const [args, setArgs] = useState(initial.args)
+      const [url, setUrl] = useState(initial.url)
+      const [env, setEnv] = useState(initial.env)
+      const [headers, setHeaders] = useState(initial.headers)
       const [status, track] = useActionStatus()
       const [message, setMessage] = useState('')
+
       const submit = async () => {
-        const payload = { domain: 'mcp', op: 'add', serverName: serverName.trim(), transport, env }
+        const payload = {
+          domain: 'mcp',
+          op: editing ? 'update' : 'add',
+          serverName: editing ? editing.serverName : serverName.trim(),
+          transport,
+          env,
+        }
         if (transport === 'stdio') {
           payload.command = command.trim()
           payload.args = args
         } else {
           payload.url = url.trim()
+          payload.headers = headers
         }
         const result = await track(() => run(payload))
         if (result && result.ok) {
-          const added = result.payload && result.payload.result ? result.payload.result.server : null
-          setMessage(`已添加 ${added ? added.serverName : payload.serverName}${added && added.cwd ? `（工作目录 ${added.cwd}）` : ''}`)
+          const saved = result.payload && result.payload.result ? result.payload.result.server : null
+          setMessage(`${editing ? '已保存' : '已添加'} ${(saved && saved.serverName) || payload.serverName}${saved && saved.cwd ? `（工作目录 ${saved.cwd}）` : ''}`)
+          if (onDone) onDone()
         } else {
-          setMessage((result && result.error) || '添加失败')
+          setMessage((result && result.error) || '保存失败')
         }
         return result
       }
+
+      const label = status === 'busy'
+        ? (editing ? '保存中…' : '添加中…')
+        : status === 'ok'
+          ? (editing ? '✓ 已保存' : '✓ 已添加')
+          : status === 'error'
+            ? (editing ? '✗ 保存失败' : '✗ 添加失败')
+            : (editing ? '保存修改' : '安装 MCP 服务器')
+
       return h(
         'div',
         { style: s.form },
-        h(Field, { label: '服务器名（工具前缀 mcp__<名>__）' }, h(TextInput, { value: serverName, onChange: e => setServerName(e.target.value), placeholder: 'github' })),
+        h(
+          Field,
+          { label: editing ? '服务器名（改名请删除后重建）' : '服务器名（工具前缀 mcp__<名>__）' },
+          h(TextInput, { value: serverName, disabled: Boolean(editing), onChange: e => setServerName(e.target.value), placeholder: 'github' }),
+        ),
         h(
           Field,
           { label: '传输' },
@@ -855,22 +922,32 @@ window.__ModuleLoader__.load({
           : h(Field, { label: 'URL' }, h(TextInput, { value: url, onChange: e => setUrl(e.target.value), placeholder: 'http://127.0.0.1:3000/mcp' })),
         transport === 'stdio'
           ? h(Field, { label: '参数（每行一个）' }, h('textarea', { value: args, onChange: e => setArgs(e.target.value), style: s.textarea, placeholder: '-y\n@modelcontextprotocol/server-github' }))
-          : h(Field, { label: '环境变量（每行 KEY=VALUE）' }, h('textarea', { value: env, onChange: e => setEnv(e.target.value), style: s.textarea, placeholder: 'GITHUB_TOKEN=xxx' })),
-        transport === 'stdio'
-          ? h(Field, { label: '环境变量（每行 KEY=VALUE）', wide: true }, h('textarea', { value: env, onChange: e => setEnv(e.target.value), style: s.textarea, placeholder: 'GITHUB_TOKEN=xxx' }))
-          : null,
+          : h(Field, { label: 'Headers（每行 KEY=VALUE）' }, h('textarea', { value: headers, onChange: e => setHeaders(e.target.value), style: s.textarea, placeholder: 'Authorization=Bearer xxx' })),
+        h(
+          Field,
+          { label: '环境变量（stdio 传输才会用到；每行 KEY=VALUE）', wide: true },
+          h('textarea', { value: env, onChange: e => setEnv(e.target.value), style: s.textarea, placeholder: 'GITHUB_TOKEN=xxx' }),
+        ),
         h(
           'div',
           { style: { ...s.wide, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px' } },
           h(StatusLine, { status, message }),
-          h(Button, { kind: 'primary', busy: busy || status === 'busy', onClick: submit }, status === 'busy' ? '添加中…' : status === 'ok' ? '✓ 已添加' : status === 'error' ? '✗ 添加失败' : '安装 MCP 服务器'),
+          editing ? h(Button, { onClick: onCancel }, '取消') : null,
+          h(Button, { kind: 'primary', busy: busy || status === 'busy', onClick: submit }, label),
         ),
       )
     }
 
     function McpTab({ snapshot, busy, run }) {
+      const [editing, setEditing] = useState(null)
       const mcp = (snapshot && snapshot.mcp) || { servers: [], patchPath: null }
       const expected = mcp.servers.filter(server => server.enabled !== false).map(server => server.serverName)
+      const remove = server => {
+        // A server removed while it is open in the form must not leave the form
+        // pointing at a name the next save cannot find.
+        if (editing && editing.serverName === server.serverName) setEditing(null)
+        return run({ domain: 'mcp', op: 'delete', serverName: server.serverName })
+      }
       return h(
         React.Fragment,
         null,
@@ -887,15 +964,29 @@ window.__ModuleLoader__.load({
           : h(
               'div',
               { style: s.list },
-              mcp.servers.map(server => h(McpRow, { key: server.serverName, server, busy, run })),
+              mcp.servers.map(server => h(McpRow, {
+                key: server.serverName,
+                server,
+                busy,
+                run,
+                onEdit: () => setEditing(server),
+                onDelete: remove,
+              })),
             ),
-        h('div', { style: s.sectionTitle }, '安装'),
-        h(AddMcp, { busy, run }),
+        h('div', { style: s.sectionTitle }, editing ? `编辑 ${editing.serverName}` : '安装'),
+        h(McpForm, {
+          key: editing ? `edit:${editing.serverName}` : 'add',
+          busy,
+          run,
+          editing,
+          onDone: () => setEditing(null),
+          onCancel: () => setEditing(null),
+        }),
         h(
           'div',
           { style: s.banner() },
           mcp.patchPath
-            ? `写入位置：${mcp.patchPath}（受管段落${mcp.blockPresent ? '已存在' : '尚未生成'}）`
+            ? `写入位置：${mcp.patchPath}（受管段落${mcp.blockPresent ? '已存在' : '尚未生成'}）${mcp.statePath ? ` · 状态：${mcp.statePath}` : ''}`
             : '未检测到 profile 目录，MCP 行无法写入。',
         ),
       )
