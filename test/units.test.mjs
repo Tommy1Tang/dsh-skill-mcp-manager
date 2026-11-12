@@ -185,6 +185,35 @@ test('configuredProjectDirs keeps every explicit root', () => {
   assert.equal(T.configuredProjectDirs({ projectRoots: explicit }).length, 20)
 })
 
+test('editFrontmatter adds, replaces, and removes one key without touching the body', () => {
+  const text = '---\nname: x\ndescription: Keep me.\n---\n\n# body\ndisable-model-invocation: not frontmatter\n'
+  const closed = T.editFrontmatter(text, { 'disable-model-invocation': 'true' })
+  assert.match(closed, /description: Keep me\.\ndisable-model-invocation: true\n---/)
+  assert.match(closed, /disable-model-invocation: not frontmatter/)
+
+  const opened = T.editFrontmatter(closed, { 'disable-model-invocation': null })
+  assert.ok(!opened.includes('disable-model-invocation: true'))
+  assert.match(opened, /# body/)
+  assert.throws(() => T.editFrontmatter('# no frontmatter\n', { a: 'b' }), /没有 frontmatter/)
+})
+
+test('assertPatchShape refuses duplicated markers and tab indentation', () => {
+  assert.throws(
+    () => T.assertPatchShape(`${T.BLOCK_START}\n${T.BLOCK_START}\n${T.BLOCK_END}`),
+    /标记重复/,
+  )
+  assert.throws(() => T.assertPatchShape('- insert:\n\t- id: x\n'), /制表符/)
+  assert.throws(() => T.assertPatchShape(`${T.BLOCK_START}\n- insert:\n`), /不配对/)
+  assert.doesNotThrow(() => T.assertPatchShape(`${T.BLOCK_START}\n- insert:\n${T.BLOCK_END}\n`))
+})
+
+test('uniqueRoots collapses aliases of one store', () => {
+  const dir = join(sandbox, 'store')
+  const config = { installRoot: dir, customSkillDirs: [dir] }
+  const roots = T.uniqueRoots(config)
+  assert.equal(roots.filter(root => root === dir).length, 1)
+})
+
 test('blockServerNames reads only the managed block', () => {
   const patch = [
     '# hand written',

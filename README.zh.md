@@ -25,7 +25,19 @@
 | 安装 | 在「安装地址」那个目录下写 `<name>/SKILL.md`（name 必须 kebab-case，description 必填）；也可以填绝对路径，把已有目录/文件整体导入 |
 | 禁用 | 把条目移进同根的 `.disabled/`（该目录不在发现深度内，skill 立刻从目录消失） |
 | 启用 | 从 `.disabled/` 移回根目录 |
-| 删除 | 删除磁盘上的目录/文件；不在扫描根里的条目用「按路径删除」（仍然只允许删已知根内的路径，见下） |
+| 策略 | 改 frontmatter 里的 `disable-model-invocation`：面板上的「仅手动 / 允许模型调用」就是把这一行加上或删掉（只动这一行，正文和其它键原样保留） |
+| 删除 | 移进同根 `.trash/`，不再直接抹掉；`.trash/index.json` 记下原路径，所以「恢复」能把它放回原位置（含原本处于 `.disabled/` 的情况）；「彻底删除」才真正 `rm` |
+| 批量 | 勾选多行后一次启用 / 禁用 / 删除；逐项返回结果，失败的条目单独报原因，不影响其余条目 |
+
+不在扫描根里的条目用「按路径删除」——仍然只允许删已知根内的路径，且同样先进回收站。
+
+### 面板上的三种「状态」
+
+| 你看到的 | 它的证据 |
+|---|---|
+| 启用中 | 文件在扫描根里，provider 会扫描到它 |
+| 模型不可见 | frontmatter 缺 `name`/`description`，或写了 `disable-model-invocation: true`——provider 会把该条从模型目录里摘掉 |
+| 项目 | 这个 skill 位于某个已登记项目的 `.dsh/skills` 或 `.agents/skills` 下，只对该项目目录启动的会话可见 |
 
 ### 拖入安装（文件夹 / SKILL.md / zip）
 
@@ -129,6 +141,11 @@ junction 对 Node 完全透明：provider 照常 `readdir`、chokidar 照常监�
 | 禁用 | 从受管段落里移除该行 |
 | 启用 | 重新写入该行 |
 | 删除 | 从状态里删掉并重写段落；服务器清零时整段移除，patch 文件恢复原样 |
+| 批量 | 勾选多行后一次启用 / 禁用 / 删除，逐项回报 |
+
+**连接状态不是猜的。** `dsh-mcp-client` 把工具注册成 `mcp__<serverName>__<tool>`，所以面板读 `ctx.tools.view()` 的全局工具表，按前缀归组：有工具就是「已连接 · N 工具」，没有就是「未连接」，拿不到 tools 服务则显示「状态未知」——绝不会因为 patch 里有一行就报「启用中」。
+
+写入 patch 前会做结构检查（重复/不配对标记、制表符缩进），并把上一版留在 `cordis.patch.yml.bak`；写后回读校验，不一致就回滚。
 
 受管段落以 `# >>> dsh-skill-mcp-manager (managed)` 开头、`# <<< dsh-skill-mcp-manager` 结尾，段落外的一切（注释、手写行）原样保留。
 
@@ -155,11 +172,16 @@ POST /skill-mcp-manager/action
     { "path": "my-skill/SKILL.md", "text": "---\nname: my-skill\n..." },
     { "path": "my-skill/assets/logo.png", "base64": "<base64>" }
   ] }
-// 禁用 / 启用 / 删除
+// 禁用 / 启用 / 删除（删除进回收站，返回 trashId）
 { "domain": "skill", "op": "disable", "name": "my-skill" }
 { "domain": "skill", "op": "enable",  "name": "my-skill" }
 { "domain": "skill", "op": "delete",  "name": "my-skill" }
 { "domain": "skill", "op": "delete",  "path": "D:\\skills\\my-skill" }
+// 回收站 / 策略 / 批量
+{ "domain": "skill", "op": "restore", "id": "m3k2abc-trash-me" }
+{ "domain": "skill", "op": "purge",   "id": "m3k2abc-trash-me" }
+{ "domain": "skill", "op": "policy",  "name": "grill-me", "modelInvocable": true }
+{ "domain": "skill", "op": "batch",   "action": "disable", "names": ["a-skill", "b-skill"] }
 
 // 安装 MCP 服务器
 { "domain": "mcp", "op": "add", "serverName": "github", "transport": "stdio",
@@ -169,13 +191,16 @@ POST /skill-mcp-manager/action
 // 编辑（serverName 是定位键，不能在这条请求里改名；远端服务器可改 url / headers）
 { "domain": "mcp", "op": "update", "serverName": "remote", "transport": "streamable-http",
   "url": "http://127.0.0.1:3000/mcp", "headers": "Authorization=Bearer yyy" }
-// 开关 / 删除
+// 开关 / 删除 / 批量
 { "domain": "mcp", "op": "disable", "serverName": "github" }
 { "domain": "mcp", "op": "enable",  "serverName": "github" }
 { "domain": "mcp", "op": "delete",  "serverName": "github" }
+{ "domain": "mcp", "op": "batch",   "action": "disable", "serverNames": ["github"] }
 ```
 
-失败一律 `400` + `{ "ok": false, "error": "原因" }`，成功返回 `{ "ok": true, "result": …, …最新快照 }`。快照里的 `mcp.consistent` 与 `mcp.blockServers` 用来提示「state 期望的服务器」和「patch 段落里真实存在的服务器」是否一致，面板据此在顶部标黄；`mcp.statePath` 告诉你当前 profile 的状态文件落在哪。
+失败一律 `400` + `{ "ok": false, "error": "原因" }`（跨站/非 JSON 的写请求是 `403`），成功返回 `{ "ok": true, "result": …, …最新快照 }`。快照里的 `mcp.consistent` 与 `mcp.blockServers` 用来提示「state 期望的服务器」和「patch 段落里真实存在的服务器」是否一致，面板据此在顶部标黄；`mcp.statePath` 告诉你当前 profile 的状态文件落在哪；每台服务器还带 `status`（`connected` / `disconnected` / `disabled` / `unknown`）与 `tools` 列表。
+
+**写接口的门槛。** 只接受 `application/json`，并校验 `Origin` / `Sec-Fetch-Site`，跨站请求直接 403。这不是过度设计：这些路由能删文件，而 Host 的 HTTP 服务不做 CORS 判断——别的网页发一个 `text/plain` 的简单请求就能打进来。脚本（curl / 测试）不带 Origin，不受影响。
 
 ## 设计取舍
 
@@ -187,15 +212,19 @@ POST /skill-mcp-manager/action
 - **写操作串行，读的时候对账。** state 与 patch 是两份文件，读-改-写不能并发，路由层用一条 promise 链把动作排队；读快照时顺手解析段落里的 `serverName` 与 state 比对，不一致就报出来，而不是假装没事。
 - **项目根不猜 cwd。** provider 按每个 agent 的 cwd 扫 `<project>/.dsh/skills` 与 `<project>/.agents/skills`，Host 插件没有 cwd；用 `process.cwd()` 猜会把无关目录标成「扫描根」。所以只认两个来源：配置里的 `projectRoots` 和 `ctx.workspaceRegistry` 里登记的项目，且自动探测封顶 12 个（每个项目两个根）。
 - **state 跟着 profile 走。** 受管段落写进哪个 profile，服务器清单就该住在哪个 profile；共用 `$DSH_HOME` 一份文件时，两个 profile 会互相覆盖。旧文件保留为只读兜底，首个写操作之后自然迁移到 profile 下。
+- **状态必须有证据。** 「启用中」只表示配置在；要回答“它真的在跑吗”，就去读工具表里有没有 `mcp__<name>__` 前缀的工具。没有 tools 服务时宁可显示「状态未知」，也不假装健康。
+- **删除必须可逆。** 删除 = 移进 `.trash/` 并记录原路径；只有「彻底删除」才 `rm`。恢复会回到原位置——包括它原本在 `.disabled/` 里的情况，不会顺手把它变成启用态。
+- **批量要有逐项结果。** 批量不是“一把梭”：每个条目单独执行、单独回报，失败项写明原因，其余照常完成。
+- **写 patch 前先留退路。** 结构检查（重复/不配对标记、制表符）+ `.bak` 备份 + 写后回读校验，不一致就回滚——面板改的是整个组合加载的文件，写坏的代价不是局部的。
 
 ## 测试
 
 ```powershell
-npm test     # node --test，32 个用例，零第三方依赖
+npm test     # node --test，40 个用例，零第三方依赖
 ```
 
-- `test/units.test.mjs`：直接打 `lib/index.js` 暴露的 `__test__` 纯函数 —— BOM 剥离、frontmatter 解析/补齐、条目路径规范化、zip 解析（store + deflate）、外层剥壳、删除护栏、根序与项目根、受管段落解析。
-- `test/http.test.mjs`：假 `webServer` 收路由 + 真 `node:http` 发请求，走完整接口 —— 导入（含 BOM 包与 >256 KB 的包）、body 上限、删除护栏、skill 启停、项目根扫描与「项目」标记、MCP 增删启停与 `update`（含 headers 渲染）、patch 外来行保留、state/patch 漂移检测、按 profile 隔离的 state。
+- `test/units.test.mjs`：直接打 `lib/index.js` 暴露的 `__test__` 纯函数 —— BOM 剥离、frontmatter 解析/补齐/策略改写、条目路径规范化、zip 解析（store + deflate）、外层剥壳、删除护栏、根序与项目根、受管段落解析与结构检查。
+- `test/http.test.mjs`：假 `webServer` 收路由 + 真 `node:http` 发请求，走完整接口 —— 导入（含 BOM 包与 >256 KB 的包）、body 上限、跨站写请求被 403、删除护栏、回收站与恢复/彻底删除、策略开关、批量操作逐项结果、skill 启停、项目根扫描与「项目」标记、MCP 增删启停与 `update`（含 headers）、连接状态（fake tools 服务）、批量、patch 备份与外来行保留、state/patch 漂移、按 profile 隔离的 state。
 - `test-support/zip.mjs`：自带的极简 zip 写入器，用来造夹具，不参与测试发现。
 
 ## 卸载

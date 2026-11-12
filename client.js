@@ -346,16 +346,27 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- skills */
 
-    function SkillRow({ skill, busy, onToggle, onDelete }) {
+    function SkillRow({ skill, busy, selected, onSelect, onToggle, onDelete, onPolicy }) {
       const [confirming, setConfirming] = useState(false)
       useEffect(() => {
         if (!confirming) return undefined
         const timer = setTimeout(() => setConfirming(false), 4000)
         return () => clearTimeout(timer)
       }, [confirming])
+      // Only the invocation flag can be toggled here; a skill hidden for a
+      // missing description needs a real edit, not a switch.
+      const flagOnly = String(skill.modelInvisibleReason || '').includes('disable-model-invocation')
+      const policyAvailable = skill.modelVisible !== false || flagOnly
       return h(
         'div',
         { style: s.row },
+        h('input', {
+          type: 'checkbox',
+          checked: Boolean(selected),
+          onChange: () => onSelect(skill),
+          style: { marginTop: '3px', cursor: 'pointer' },
+          'aria-label': `选择 ${skill.name}`,
+        }),
         h(
           'div',
           { style: s.rowMain },
@@ -383,6 +394,19 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: s.actions },
+          policyAvailable
+            ? h(
+                Button,
+                {
+                  busy,
+                  title: skill.modelVisible
+                    ? '改为仅手动触发：写入 disable-model-invocation: true'
+                    : '允许模型调用：删除 disable-model-invocation 那一行',
+                  onClick: () => onPolicy(skill, skill.modelVisible !== true),
+                },
+                skill.modelVisible ? '仅手动' : '允许模型调用',
+              )
+            : null,
           h(
             Button,
             { kind: skill.disabled ? 'primary' : 'ghost', busy, onClick: () => onToggle(skill, skill.disabled) },
@@ -686,8 +710,34 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** Shared multi-select toolbar: one row, the same shape in both tabs. */
+    function BatchBar({ count, busy, actions, onClear }) {
+      if (count === 0) return null
+      return h(
+        'div',
+        {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            flexWrap: 'wrap',
+            padding: '8px 10px',
+            borderRadius: '10px',
+            border: `1px solid ${colors.borderStrong}`,
+            background: colors.layer2,
+          },
+        },
+        h('span', { style: { ...s.label, color: colors.text } }, `已选 ${count} 项`),
+        actions.map(action =>
+          h(Button, { key: action.label, kind: action.kind, busy, onClick: action.onClick }, action.label),
+        ),
+        h(Button, { busy, onClick: onClear }, '清除选择'),
+      )
+    }
+
     function SkillsTab({ snapshot, busy, run, install }) {
       const skills = (snapshot && snapshot.skills) || { active: [], disabled: [], roots: [] }
+      const [selected, setSelected] = useState(() => new Set())
       // A machine can register dozens of workspaces; a full root dump would push
       // the list off screen, so the banner shows the first few and counts the rest.
       const rootLines = (skills.roots || []).map(root => `${root.dir}${root.exists ? '' : '（不存在）'}`)
@@ -697,6 +747,30 @@ window.__ModuleLoader__.load({
       const projectSummary = snapshot && snapshot.projectRootsDetected > 0
         ? `项目根：已纳入 ${(snapshot.projectRoots || []).length} 个（工作区注册表 ${snapshot.projectRootsDetected} 个）`
         : ''
+      const all = skills.active.concat(skills.disabled)
+      const names = [...selected].filter(name => all.some(skill => skill.name === name))
+      const clearSelection = () => setSelected(new Set())
+      const toggleSelected = skill => setSelected(previous => {
+        const next = new Set(previous)
+        if (next.has(skill.name)) next.delete(skill.name)
+        else next.add(skill.name)
+        return next
+      })
+      const runBatch = action => {
+        void run({ domain: 'skill', op: 'batch', action, names })
+        clearSelection()
+      }
+      const row = skill => h(SkillRow, {
+        key: skill.path,
+        skill,
+        busy,
+        selected: selected.has(skill.name),
+        onSelect: toggleSelected,
+        onToggle: item => run({ domain: 'skill', op: skill.disabled ? 'enable' : 'disable', name: item.name }),
+        onDelete: item => run({ domain: 'skill', op: 'delete', name: item.name }),
+        onPolicy: (item, modelInvocable) => run({ domain: 'skill', op: 'policy', name: item.name, modelInvocable }),
+      })
+      const trash = skills.trash || []
       return h(
         React.Fragment,
         null,
@@ -706,37 +780,69 @@ window.__ModuleLoader__.load({
           '已启用',
           h('span', { style: s.count }, String(skills.active.length)),
         ),
+        h(BatchBar, {
+          count: names.length,
+          busy,
+          onClear: clearSelection,
+          actions: [
+            { label: '批量启用', onClick: () => runBatch('enable') },
+            { label: '批量禁用', onClick: () => runBatch('disable') },
+            { label: '批量删除', kind: 'danger', onClick: () => runBatch('delete') },
+          ],
+        }),
         skills.active.length === 0
           ? h('div', { style: s.banner() }, '当前扫描根下没有可用 skill。')
-          : h(
-              'div',
-              { style: s.list },
-              skills.active.map(skill =>
-                h(SkillRow, {
-                  key: skill.path,
-                  skill,
-                  busy,
-                  onToggle: item => run({ domain: 'skill', op: 'disable', name: item.name }),
-                  onDelete: item => run({ domain: 'skill', op: 'delete', name: item.name }),
-                }),
-              ),
-            ),
+          : h('div', { style: s.list }, skills.active.map(row)),
         skills.disabled.length > 0
           ? h(
               React.Fragment,
               null,
               h('div', { style: s.sectionTitle }, '已禁用', h('span', { style: s.count }, String(skills.disabled.length))),
+              h('div', { style: s.list }, skills.disabled.map(row)),
+            )
+          : null,
+        trash.length > 0
+          ? h(
+              React.Fragment,
+              null,
+              h('div', { style: s.sectionTitle }, '回收站', h('span', { style: s.count }, String(trash.length))),
               h(
                 'div',
                 { style: s.list },
-                skills.disabled.map(skill =>
-                  h(SkillRow, {
-                    key: skill.path,
-                    skill,
-                    busy,
-                    onToggle: item => run({ domain: 'skill', op: 'enable', name: item.name }),
-                    onDelete: item => run({ domain: 'skill', op: 'delete', name: item.name }),
-                  }),
+                trash.map(entry =>
+                  h(
+                    'div',
+                    { key: entry.id, style: s.row },
+                    h(
+                      'div',
+                      { style: s.rowMain },
+                      h('div', { style: s.rowName }, entry.name, h('span', { style: s.pill('off') }, '已删除')),
+                      h('div', { style: s.rowPath, title: entry.from }, entry.from),
+                      h(
+                        'div',
+                        { style: s.rowPath },
+                        `${new Date(entry.at).toLocaleString()}${entry.restorable ? '' : ' · 原位置已被占用'}`,
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { style: s.actions },
+                      h(
+                        Button,
+                        {
+                          busy: Boolean(busy) || !entry.restorable,
+                          title: entry.restorable ? '移回原位置' : '原位置已被占用，先处理冲突再恢复',
+                          onClick: () => run({ domain: 'skill', op: 'restore', id: entry.id }),
+                        },
+                        '恢复',
+                      ),
+                      h(
+                        Button,
+                        { kind: 'danger', busy, onClick: () => run({ domain: 'skill', op: 'purge', id: entry.id }) },
+                        '彻底删除',
+                      ),
+                    ),
+                  ),
                 ),
               ),
             )
@@ -764,16 +870,37 @@ window.__ModuleLoader__.load({
       return server.url || ''
     }
 
-    function McpRow({ server, busy, run, onEdit, onDelete }) {
+    /** One honest status label: the patch row alone never proves a connection. */
+    function serverStatus(server) {
+      const tools = Array.isArray(server.tools) ? server.tools : []
+      if (server.enabled === false) return { kind: 'off', text: '已禁用', title: '不在组合里，不会启动' }
+      if (server.status === 'connected') {
+        return { kind: 'on', text: `已连接 · ${tools.length} 工具`, title: tools.join('\n') || '工具名不可用' }
+      }
+      if (server.status === 'disconnected') {
+        return { kind: 'warn', text: '未连接', title: 'patch 里有这一行，但工具表里没有它的工具：进程没起来、启动失败，或还在连接' }
+      }
+      return { kind: 'idle', text: '状态未知', title: '当前组合没有挂载 tools 服务，无法读取连接状态' }
+    }
+
+    function McpRow({ server, busy, selected, onSelect, run, onEdit, onDelete }) {
       const [confirming, setConfirming] = useState(false)
       useEffect(() => {
         if (!confirming) return undefined
         const timer = setTimeout(() => setConfirming(false), 4000)
         return () => clearTimeout(timer)
       }, [confirming])
+      const status = serverStatus(server)
       return h(
         'div',
         { style: s.row },
+        h('input', {
+          type: 'checkbox',
+          checked: Boolean(selected),
+          onChange: () => onSelect(server),
+          style: { marginTop: '3px', cursor: 'pointer' },
+          'aria-label': `选择 ${server.serverName}`,
+        }),
         h(
           'div',
           { style: s.rowMain },
@@ -781,7 +908,7 @@ window.__ModuleLoader__.load({
             'div',
             { style: s.rowName },
             server.serverName,
-            h('span', { style: s.pill(server.enabled === false ? 'off' : 'on') }, server.enabled === false ? '已禁用' : '启用中'),
+            h('span', { style: s.pill(status.kind), title: status.title }, status.text),
             h('span', { style: { ...s.count, fontSize: '10px' } }, server.transport),
           ),
           h('div', { style: s.rowPath, title: describeServer(server) }, describeServer(server)),
@@ -940,8 +1067,21 @@ window.__ModuleLoader__.load({
 
     function McpTab({ snapshot, busy, run }) {
       const [editing, setEditing] = useState(null)
+      const [selected, setSelected] = useState(() => new Set())
       const mcp = (snapshot && snapshot.mcp) || { servers: [], patchPath: null }
       const expected = mcp.servers.filter(server => server.enabled !== false).map(server => server.serverName)
+      const names = [...selected].filter(name => mcp.servers.some(server => server.serverName === name))
+      const clearSelection = () => setSelected(new Set())
+      const toggleSelected = server => setSelected(previous => {
+        const next = new Set(previous)
+        if (next.has(server.serverName)) next.delete(server.serverName)
+        else next.add(server.serverName)
+        return next
+      })
+      const runBatch = action => {
+        void run({ domain: 'mcp', op: 'batch', action, serverNames: names })
+        clearSelection()
+      }
       const remove = server => {
         // A server removed while it is open in the form must not leave the form
         // pointing at a name the next save cannot find.
@@ -959,6 +1099,16 @@ window.__ModuleLoader__.load({
             )
           : null,
         h('div', { style: s.sectionTitle }, '服务器', h('span', { style: s.count }, String(mcp.servers.length))),
+        h(BatchBar, {
+          count: names.length,
+          busy,
+          onClear: clearSelection,
+          actions: [
+            { label: '批量启用', onClick: () => runBatch('enable') },
+            { label: '批量禁用', onClick: () => runBatch('disable') },
+            { label: '批量删除', kind: 'danger', onClick: () => runBatch('delete') },
+          ],
+        }),
         mcp.servers.length === 0
           ? h('div', { style: s.banner() }, '还没有由本面板管理的 MCP 服务器。')
           : h(
@@ -968,6 +1118,8 @@ window.__ModuleLoader__.load({
                 key: server.serverName,
                 server,
                 busy,
+                selected: selected.has(server.serverName),
+                onSelect: toggleSelected,
                 run,
                 onEdit: () => setEditing(server),
                 onDelete: remove,
@@ -1003,7 +1155,14 @@ window.__ModuleLoader__.load({
         if (op === 'import') return `已导入 skill ${result.installed}（${(result.files || []).length} 个文件）`
         if (op === 'disable') return `已禁用 skill ${result.name}`
         if (op === 'enable') return `已启用 skill ${result.name}`
-        if (op === 'delete') return `已删除 skill ${result.name}`
+        if (op === 'delete') return `已删除 skill ${result.name}（进了回收站，可恢复）`
+        if (op === 'restore') return `已恢复 skill ${result.restored} → ${result.path}`
+        if (op === 'purge') return `已彻底删除 ${result.purged}`
+        if (op === 'policy') {
+          const visible = result.skill && result.skill.modelVisible
+          return `已更新策略 ${result.name}：模型${visible ? '可见' : '不可见'}`
+        }
+        if (op === 'batch') return `批量${BATCH_LABEL[result.action] || '操作'}：成功 ${result.done}，失败 ${result.failed}`
         return 'skill 操作完成'
       }
       if (body && body.domain === 'mcp') {
@@ -1012,10 +1171,14 @@ window.__ModuleLoader__.load({
         if (op === 'enable') return `已启用 MCP 服务器 ${result.server && result.server.serverName}`
         if (op === 'disable') return `已禁用 MCP 服务器 ${result.server && result.server.serverName}`
         if (op === 'delete') return `已删除 MCP 服务器 ${result.removed && result.removed.serverName}`
+        if (op === 'batch') return `批量${BATCH_LABEL[result.action] || '操作'}：成功 ${result.done}，失败 ${result.failed}`
         return 'MCP 操作完成'
       }
       return '操作完成'
     }
+
+    /** Toast text for batch actions, shared by both domains. */
+    const BATCH_LABEL = { enable: '启用', disable: '禁用', delete: '删除' }
 
     /** Label for the intent alone, used when the action failed and there is no result. */
     function actionLabel(body) {
@@ -1027,6 +1190,10 @@ window.__ModuleLoader__.load({
         if (op === 'disable') return `禁用 skill ${name}`
         if (op === 'enable') return `启用 skill ${name}`
         if (op === 'delete') return `删除 skill ${name || (body && body.path) || ''}`
+        if (op === 'restore') return '恢复 skill'
+        if (op === 'purge') return '彻底删除'
+        if (op === 'policy') return `切换策略 ${name}`
+        if (op === 'batch') return `批量${BATCH_LABEL[body.action] || '操作'}`
       }
       if (body && body.domain === 'mcp') {
         if (op === 'add') return `添加 MCP 服务器 ${name}`
@@ -1034,6 +1201,7 @@ window.__ModuleLoader__.load({
         if (op === 'enable') return `启用 MCP 服务器 ${name}`
         if (op === 'disable') return `禁用 MCP 服务器 ${name}`
         if (op === 'delete') return `删除 MCP 服务器 ${name}`
+        if (op === 'batch') return `批量${BATCH_LABEL[body.action] || '操作'}`
       }
       return '操作'
     }

@@ -39,8 +39,13 @@ await fs.writeFile(patchFile, foreignPatch, 'utf8')
 
 const routes = []
 let workspaceRegistry = null
+let toolView = null
 const ctx = {
-  get: name => (name === 'workspaceRegistry' ? workspaceRegistry : undefined),
+  get: name => {
+    if (name === 'workspaceRegistry') return workspaceRegistry
+    if (name === 'tools') return toolView ? { view: () => toolView } : undefined
+    return undefined
+  },
   effect(fn) {
     const dispose = fn()
     return typeof dispose === 'function' ? dispose : () => {}
@@ -454,6 +459,190 @@ test('detected project roots are capped, explicit ones are not', async () => {
   const after = await getState()
   assert.deepEqual(after.body.projectRoots, [])
   assert.equal(after.body.projectRootsDetected, 0)
+})
+
+test('writes are refused unless they come from this panel', async () => {
+  const plain = await fetch(`${base}${MOUNT}/action`, {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain' },
+    body: JSON.stringify({ domain: 'skill', op: 'enable', name: 'nope' }),
+  })
+  assert.equal(plain.status, 403)
+  assert.match((await plain.json()).error, /application\/json/)
+
+  const crossSite = await fetch(`${base}${MOUNT}/action`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
+    body: JSON.stringify({ domain: 'skill', op: 'enable', name: 'nope' }),
+  })
+  assert.equal(crossSite.status, 403)
+  assert.match((await crossSite.json()).error, /拒绝跨站请求/)
+
+  // Same origin passes the gate and fails later on the missing skill instead.
+  const sameSite = await fetch(`${base}${MOUNT}/action`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: base },
+    body: JSON.stringify({ domain: 'skill', op: 'enable', name: 'nope' }),
+  })
+  assert.equal(sameSite.status, 400)
+})
+
+test('delete parks a skill in the trash and can restore or purge it', async () => {
+  const root = config.customSkillDirs[0]
+  const zip = makeZip([
+    { path: 'trash-me/SKILL.md', data: '---\nname: trash-me\ndescription: Temporary.\n---\n' },
+  ])
+  const imported = await act({ domain: 'skill', op: 'import', zip: zip.toString('base64'), root })
+  assert.equal(imported.status, 200)
+
+  const removed = await act({ domain: 'skill', op: 'delete', name: 'trash-me' })
+  assert.equal(removed.status, 200)
+  const trashId = removed.body.result.trashId
+  assert.ok(trashId, 'delete must report the trash id')
+  assert.ok(removed.body.skills.trash.some(entry => entry.name === 'trash-me'))
+  await assert.rejects(fs.stat(join(root, 'trash-me')))
+
+  const restored = await act({ domain: 'skill', op: 'restore', id: trashId })
+  assert.equal(restored.status, 200)
+  assert.ok((await fs.stat(join(root, 'trash-me'))).isDirectory())
+  assert.ok(!restored.body.skills.trash.some(entry => entry.id === trashId))
+
+  // A disabled skill is restored into `.disabled/`, not turned live.
+  await act({ domain: 'skill', op: 'disable', name: 'trash-me' })
+  const parked = await act({ domain: 'skill', op: 'delete', name: 'trash-me' })
+  const parkedRestore = await act({ domain: 'skill', op: 'restore', id: parked.body.result.trashId })
+  assert.equal(parkedRestore.status, 200)
+  assert.ok((await fs.stat(join(root, '.disabled', 'trash-me'))).isDirectory())
+  assert.ok(!parkedRestore.body.skills.active.some(skill => skill.name === 'trash-me'))
+
+  const again = await act({ domain: 'skill', op: 'delete', name: 'trash-me' })
+  const purged = await act({ domain: 'skill', op: 'purge', id: again.body.result.trashId })
+  assert.equal(purged.status, 200)
+  assert.ok(!purged.body.skills.trash.some(entry => entry.id === again.body.result.trashId))
+  await assert.rejects(fs.stat(join(root, '.trash', again.body.result.trashId)))
+})
+
+test('batch actions report per-item results', async () => {
+  const root = config.customSkillDirs[0]
+  for (const name of ['batch-a', 'batch-b']) {
+    const zip = makeZip([{ path: `${name}/SKILL.md`, data: `---\nname: ${name}\ndescription: Batch.\n---\n` }])
+    await act({ domain: 'skill', op: 'import', zip: zip.toString('base64'), root })
+  }
+
+  const disabled = await act({ domain: 'skill', op: 'batch', action: 'disable', names: ['batch-a', 'batch-b', 'missing-one'] })
+  assert.equal(disabled.status, 200)
+  assert.equal(disabled.body.result.done, 2)
+  assert.equal(disabled.body.result.failed, 1)
+  assert.equal(disabled.body.result.results.find(item => item.name === 'missing-one').ok, false)
+
+  const enabled = await act({ domain: 'skill', op: 'batch', action: 'enable', names: ['batch-a', 'batch-b'] })
+  assert.equal(enabled.body.result.done, 2)
+
+  const removed = await act({ domain: 'skill', op: 'batch', action: 'delete', names: ['batch-a', 'batch-b'] })
+  assert.equal(removed.body.result.done, 2)
+  await assert.rejects(fs.stat(join(root, 'batch-a')))
+})
+
+test('policy toggles the invocation flag and nothing else', async () => {
+  const root = config.customSkillDirs[0]
+  const zip = makeZip([{
+    path: 'flag-skill/SKILL.md',
+    data: '---\nname: flag-skill\ndescription: Flagged.\ndisable-model-invocation: true\n---\n\n# body\n',
+  }])
+  await act({ domain: 'skill', op: 'import', zip: zip.toString('base64'), root })
+
+  const opened = await act({ domain: 'skill', op: 'policy', name: 'flag-skill', modelInvocable: true })
+  assert.equal(opened.status, 200)
+  assert.equal(opened.body.result.skill.modelVisible, true)
+  let text = await fs.readFile(join(root, 'flag-skill', 'SKILL.md'), 'utf8')
+  assert.ok(!text.includes('disable-model-invocation'))
+  assert.match(text, /description: Flagged\./)
+  assert.match(text, /# body/)
+
+  const closed = await act({ domain: 'skill', op: 'policy', name: 'flag-skill', modelInvocable: false })
+  assert.equal(closed.status, 200)
+  assert.equal(closed.body.result.skill.modelVisible, false)
+  text = await fs.readFile(join(root, 'flag-skill', 'SKILL.md'), 'utf8')
+  assert.match(text, /disable-model-invocation: true/)
+  assert.match(text, /description: Flagged\./)
+
+  await act({ domain: 'skill', op: 'delete', name: 'flag-skill' })
+})
+
+test('MCP rows report live connection state and support batch actions', async () => {
+  await act({ domain: 'mcp', op: 'add', serverName: 'status-mcp', transport: 'stdio', command: 'node' })
+
+  toolView = {
+    visible: new Map([
+      ['mcp__status-mcp__ping', {}],
+      ['mcp__other-mcp__x', {}],
+    ]),
+  }
+  try {
+    const live = await getState()
+    const row = live.body.mcp.servers.find(server => server.serverName === 'status-mcp')
+    assert.equal(row.status, 'connected')
+    assert.deepEqual(row.tools, ['ping'])
+
+    toolView = { visible: new Map() }
+    const down = await getState()
+    assert.equal(down.body.mcp.servers.find(server => server.serverName === 'status-mcp').status, 'disconnected')
+  } finally {
+    toolView = null
+  }
+  const unknown = await getState()
+  assert.equal(unknown.body.mcp.servers.find(server => server.serverName === 'status-mcp').status, 'unknown')
+
+  const batch = await act({ domain: 'mcp', op: 'batch', action: 'delete', serverNames: ['status-mcp', 'nope'] })
+  assert.equal(batch.status, 200)
+  assert.equal(batch.body.result.done, 1)
+  assert.equal(batch.body.result.failed, 1)
+})
+
+test('a patch rewrite keeps the previous revision beside the file', async () => {
+  await act({ domain: 'mcp', op: 'add', serverName: 'backup-mcp', transport: 'stdio', command: 'node' })
+  const backup = await fs.readFile(`${patchFile}.bak`, 'utf8')
+  assert.match(backup, /hand written comment/)
+  assert.ok(!backup.includes('backup-mcp'), 'the backup holds the revision from before this write')
+  await act({ domain: 'mcp', op: 'delete', serverName: 'backup-mcp' })
+})
+
+test('a junction alias does not duplicate listings or trash entries', async () => {
+  const root = config.customSkillDirs[0]
+  const link = join(sandbox, 'custom-alias')
+  await fs.symlink(root, link, 'junction')
+  config.customSkillDirs.push(link)
+  try {
+    const zip = makeZip([
+      { path: 'alias-skill/SKILL.md', data: '---\nname: alias-skill\ndescription: Alias check.\n---\n' },
+    ])
+    await act({ domain: 'skill', op: 'import', zip: zip.toString('base64'), root })
+
+    const listed = await getState()
+    assert.equal(
+      listed.body.skills.active.filter(skill => skill.name === 'alias-skill').length,
+      1,
+      'one store must be scanned once, not once per alias',
+    )
+
+    const removed = await act({ domain: 'skill', op: 'delete', name: 'alias-skill' })
+    assert.equal(
+      removed.body.skills.trash.filter(entry => entry.name === 'alias-skill').length,
+      1,
+      'the trash index is shared by the alias, so it must not be listed twice',
+    )
+
+    const restored = await act({ domain: 'skill', op: 'restore', id: removed.body.result.trashId })
+    assert.equal(restored.status, 200)
+    assert.ok((await fs.stat(join(root, 'alias-skill'))).isDirectory())
+
+    const again = await act({ domain: 'skill', op: 'delete', name: 'alias-skill' })
+    const purged = await act({ domain: 'skill', op: 'purge', id: again.body.result.trashId })
+    assert.equal(purged.status, 200)
+  } finally {
+    config.customSkillDirs.pop()
+    await fs.unlink(link)
+  }
 })
 
 test('unknown domains and operations answer 400 with a reason', async () => {
