@@ -1,0 +1,41 @@
+{
+  "name": "dsh-skill-mcp-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One panel for local skills and MCP servers: list, install, enable, disable, delete.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.zh.md"
+  ],
+  "icon": "./icon.svg",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,9 @@
+# 统一按 LF 存库，Windows 工作区由 git 自己转换
+* text=auto
+
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.svg   text eol=lf

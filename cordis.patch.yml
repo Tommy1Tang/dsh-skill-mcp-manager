@@ -1,0 +1,9 @@
+# dsh-skill-mcp-manager bundle patch
+#
+# One row: the Host half registers the /skill-mcp-manager routes that the
+# browser panel calls. The MCP servers the panel manages are NOT listed here —
+# the panel writes its own managed block into the profile's cordis.patch.yml.
+
+- insert:
+    - id: skill-mcp-manager
+      name: 'dsh-skill-mcp-manager'
