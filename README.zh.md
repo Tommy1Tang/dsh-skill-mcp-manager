@@ -25,6 +25,26 @@
 | 启用 | 从 `.disabled/` 移回根目录 |
 | 删除 | 删除磁盘上的目录/文件；不在扫描根里的条目用「按路径删除」 |
 
+### 拖入安装（文件夹 / SKILL.md / zip）
+
+面板「安装」区最上面是一个虚线投放框，三种东西都能直接扔进去：
+
+| 拖入内容 | 处理方式 |
+|---|---|
+| `<name>/` 文件夹（含 `SKILL.md`） | 浏览器递归读取（`webkitGetAsEntry`），保留 `references/`、`scripts/`、`assets/` 等全部文件，文本按文本传、二进制按 base64 传 |
+| 单个 `SKILL.md` | 直接作为 bundle 根，缺 `name`/`description` 时自动补齐 |
+| `<name>.zip`（或 GitHub 下载的 `repo-main.zip`） | 上传后由 Host 用内置 zip 解析器解包（中央目录 + `inflateRawSync`，无第三方依赖），自动剥掉外层包装目录 |
+
+规则与边界：
+
+- 包里必须有 `SKILL.md`；`SKILL.md` 必须在（剥壳后的）根目录，否则报错并指出实际位置。
+- 目录名取 `name` → frontmatter 的 `name` → 外层目录名，统一 slug 成 kebab-case。
+- 缺 `description` 会补一句占位描述并给出 warning（否则 provider 会静默丢弃该 skill），请事后改成真实描述。
+- 拒绝 `..`、绝对路径、盘符路径；`.git/`、`__MACOSX/`、`.DS_Store`、`Thumbs.db` 直接忽略。
+- 上限：单次 12 MB / 400 个文件；zip64 不支持。
+- 目标已存在时要显式覆盖（面板走同一接口时由后端拒绝并回传原因）。
+- 也可以不经拖放：虚线框里的「选择文件夹」「选择文件 / zip」按钮走同一套逻辑。
+
 ### 把 skill / MCP 放到 D 盘
 
 **skill：为什么不能只改扫描根。** web 组合里全局 `skill-filesystem` 行是 `disabled` 的（见 `packages/bundle/web-app/cordis.patch.yml`），实际发现由 **agent preset** 各自挂载自己的 `skill-filesystem`，profile patch 里给全局行写 `customSkillDirs` 不会生效。所以磁盘位置用目录联接（junction）解决——路径不变，数据在 D 盘：
@@ -104,6 +124,13 @@ POST /skill-mcp-manager/action
 { "domain": "skill", "op": "install", "name": "my-skill", "description": "…", "root": "D:\\skills" }
 // 导入已有目录
 { "domain": "skill", "op": "install", "from": "D:\\skills\\my-skill" }
+// 拖入：zip（base64）
+{ "domain": "skill", "op": "import", "zip": "<base64>", "overwrite": false }
+// 拖入：文件夹清单（文本走 text，二进制走 base64）
+{ "domain": "skill", "op": "import", "files": [
+    { "path": "my-skill/SKILL.md", "text": "---\nname: my-skill\n..." },
+    { "path": "my-skill/assets/logo.png", "base64": "<base64>" }
+  ] }
 // 禁用 / 启用 / 删除
 { "domain": "skill", "op": "disable", "name": "my-skill" }
 { "domain": "skill", "op": "enable",  "name": "my-skill" }

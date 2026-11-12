@@ -425,6 +425,178 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ------------------------------------------------------------- dropzone */
+
+    // Extensions shipped as text; everything else travels as base64 so a
+    // dropped bundle keeps its assets byte-for-byte.
+    const TEXT_EXT = new Set([
+      '.md', '.markdown', '.txt', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.ini',
+      '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.sh', '.ps1', '.bat',
+      '.html', '.htm', '.css', '.csv', '.xml', '.sql', '.gitignore', '',
+    ])
+
+    function extensionOf(name) {
+      const index = String(name || '').lastIndexOf('.')
+      return index <= 0 ? '' : String(name).slice(index).toLowerCase()
+    }
+
+    function toBase64(bytes) {
+      let binary = ''
+      const chunk = 0x8000
+      for (let offset = 0; offset < bytes.length; offset += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + chunk))
+      }
+      return btoa(binary)
+    }
+
+    /** Walk a dropped entry tree (folder support needs webkitGetAsEntry). */
+    async function walkEntry(entry, prefix, out) {
+      if (!entry) return
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+        out.push({ path: prefix ? `${prefix}/${file.name}` : file.name, file })
+        return
+      }
+      if (!entry.isDirectory) return
+      const reader = entry.createReader()
+      const next = () => new Promise(resolve => reader.readEntries(resolve, () => resolve([])))
+      const folder = prefix ? `${prefix}/${entry.name}` : entry.name
+      let batch = await next()
+      while (batch.length > 0) {
+        for (const child of batch) await walkEntry(child, folder, out)
+        batch = await next()
+      }
+    }
+
+    async function collectDropped(dataTransfer) {
+      const items = Array.from(dataTransfer.items || [])
+      const entries = items
+        .map(item => (typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null))
+        .filter(Boolean)
+      if (entries.length > 0) {
+        const out = []
+        for (const entry of entries) await walkEntry(entry, '', out)
+        return out
+      }
+      return Array.from(dataTransfer.files || []).map(file => ({ path: file.name, file }))
+    }
+
+    async function filePayload(entry) {
+      const name = entry.path
+      if (TEXT_EXT.has(extensionOf(name))) {
+        return { path: name, text: await entry.file.text() }
+      }
+      const buffer = await entry.file.arrayBuffer()
+      return { path: name, base64: toBase64(new Uint8Array(buffer)) }
+    }
+
+    function DropZone({ busy, snapshot, onImport }) {
+      const [dragging, setDragging] = useState(false)
+      const [reading, setReading] = useState('')
+      const fileInput = useRef(null)
+      const dirInput = useRef(null)
+      const root = (snapshot && snapshot.installRoot) || ''
+
+      const handleFiles = useCallback(async entries => {
+        if (!entries || entries.length === 0) return
+        setReading('读取中…')
+        try {
+          const zips = entries.filter(entry => extensionOf(entry.path) === '.zip')
+          if (zips.length === 1 && entries.length === 1) {
+            const buffer = await zips[0].file.arrayBuffer()
+            if (buffer.byteLength > 12 * 1024 * 1024) throw new Error('zip 超过 12 MB 上限')
+            setReading(`解析 ${zips[0].path}`)
+            await onImport({ op: 'import', zip: toBase64(new Uint8Array(buffer)), root })
+          } else if (zips.length > 0) {
+            throw new Error('一次只支持拖入一个 zip，或拖入文件夹')
+          } else {
+            const files = []
+            let total = 0
+            for (const entry of entries) {
+              const payload = await filePayload(entry)
+              const size = payload.text !== undefined ? payload.text.length : Math.floor((payload.base64.length * 3) / 4)
+              total += size
+              if (total > 12 * 1024 * 1024) throw new Error('拖入内容超过 12 MB 上限')
+              files.push(payload)
+            }
+            setReading(`上传 ${files.length} 个文件`)
+            await onImport({ op: 'import', files, root })
+          }
+        } catch (cause) {
+          throw cause
+        } finally {
+          setReading('')
+        }
+      }, [onImport, root])
+
+      const onDrop = useCallback(async event => {
+        event.preventDefault()
+        setDragging(false)
+        try {
+          await handleFiles(await collectDropped(event.dataTransfer))
+        } catch (cause) {
+          console.error('[skill-mcp-manager] drop failed', cause)
+        }
+      }, [handleFiles])
+
+      const inputProps = {
+        type: 'file',
+        multiple: true,
+        style: { display: 'none' },
+        onChange: async event => {
+          const chosen = event.target.files
+          if (!chosen || chosen.length === 0) return
+          const entries = Array.from(chosen).map(file => ({
+            path: file.webkitRelativePath && file.webkitRelativePath.length > 0 ? file.webkitRelativePath : file.name,
+            file,
+          }))
+          const picked = event.target
+          try {
+            await handleFiles(entries)
+          } finally {
+            picked.value = ''
+          }
+        },
+      }
+
+      return h(
+        'div',
+        {
+          onDragOver: event => {
+            event.preventDefault()
+            setDragging(true)
+          },
+          onDragLeave: () => setDragging(false),
+          onDrop,
+          style: {
+            border: `1px dashed ${dragging ? colors.brand : colors.borderStrong}`,
+            background: dragging ? colors.layer2 : colors.base,
+            borderRadius: '10px',
+            padding: '18px 14px',
+            textAlign: 'center',
+            color: colors.muted,
+            fontSize: '12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            alignItems: 'center',
+          },
+        },
+        h('div', { style: { color: colors.text, fontSize: '13px', fontWeight: 600 } }, '拖入 skill 文件夹、SKILL.md 或 .zip'),
+        h('div', null, '整包解析：保留 references / scripts / assets，自动读 frontmatter 定名，缺描述会补齐'),
+        h('div', { style: { fontSize: '11px' } }, root ? `安装到 ${root}` : '安装地址未设置'),
+        h(
+          'div',
+          { style: { display: 'flex', gap: '6px' } },
+          h(Button, { busy: Boolean(busy || reading), onClick: () => dirInput.current && dirInput.current.click() }, '选择文件夹'),
+          h(Button, { busy: Boolean(busy || reading), onClick: () => fileInput.current && fileInput.current.click() }, '选择文件 / zip'),
+        ),
+        reading ? h('div', { style: { color: colors.brand } }, reading) : null,
+        h('input', { ...inputProps, accept: '.zip,.md,.markdown,.txt', ref: fileInput }),
+        h('input', { ...inputProps, webkitdirectory: '', directory: '', ref: dirInput }),
+      )
+    }
+
     function SkillsTab({ snapshot, busy, run, install }) {
       const skills = (snapshot && snapshot.skills) || { active: [], disabled: [], roots: [] }
       return h(
@@ -472,6 +644,7 @@ window.__ModuleLoader__.load({
             )
           : null,
         h('div', { style: s.sectionTitle }, '安装'),
+        h(DropZone, { busy, snapshot, onImport: install }),
         h(InstallSkill, { busy, snapshot, onInstall: install }),
         h(PathDelete, { busy, run }),
         h(
@@ -657,7 +830,11 @@ window.__ModuleLoader__.load({
         setNotice('')
         try {
           const payload = await request('/action', { method: 'POST', body: JSON.stringify(body) })
-          if (payload && payload.result && payload.result.scanned === false) {
+          const warnings = payload && payload.result && Array.isArray(payload.result.warnings)
+            ? payload.result.warnings
+            : []
+          if (warnings.length > 0) setNotice(warnings.join(' '))
+          else if (payload && payload.result && payload.result.scanned === false) {
             setNotice(`已写入 ${payload.result.path}，但该目录不是扫描根：skill 不会出现在模型目录里。`)
           }
           if (payload && payload.skills && payload.mcp) setSnapshot(payload)
