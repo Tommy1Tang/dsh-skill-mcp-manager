@@ -106,6 +106,7 @@ window.__ModuleLoader__.load({
         maxHeight: 'min(84vh, 780px)',
         display: 'flex',
         flexDirection: 'column',
+        position: 'relative',
         background: colors.layer1,
         color: colors.text,
         border: `1px solid ${colors.borderStrong}`,
@@ -287,6 +288,51 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------- controls */
 
+    /**
+     * Track one button's own outcome: idle → busy → ok | error, then back to
+     * idle. The shared toast reports every mutation; this keeps the button the
+     * user pressed answering for itself.
+     */
+    function useActionStatus() {
+      const [status, setStatus] = useState('idle')
+      const timer = useRef(null)
+      const settle = useCallback(next => {
+        setStatus(next)
+        if (timer.current) clearTimeout(timer.current)
+        if (next === 'ok' || next === 'error') {
+          timer.current = setTimeout(() => setStatus('idle'), 4000)
+        }
+      }, [])
+      useEffect(() => () => {
+        if (timer.current) clearTimeout(timer.current)
+      }, [])
+      const track = useCallback(async thunk => {
+        settle('busy')
+        try {
+          const result = await thunk()
+          settle(result && result.ok ? 'ok' : 'error')
+          return result
+        } catch (cause) {
+          settle('error')
+          return { ok: false, error: String((cause && cause.message) || cause) }
+        }
+      }, [settle])
+      return [status, track]
+    }
+
+    const STATUS_TEXT = { busy: '处理中…', ok: '成功', error: '失败' }
+
+    function StatusLine({ status, message }) {
+      if (status === 'idle') return message ? h('div', { style: { ...s.label, color: colors.muted } }, message) : null
+      const tone = status === 'ok' ? colors.success : status === 'error' ? colors.danger : colors.muted
+      return h(
+        'div',
+        { style: { ...s.label, color: tone, display: 'flex', gap: '6px', alignItems: 'center' }, role: 'status', 'aria-live': 'polite' },
+        h('span', { 'aria-hidden': true }, status === 'ok' ? '✓' : status === 'error' ? '✗' : '…'),
+        h('span', null, message || STATUS_TEXT[status]),
+      )
+    }
+
     function Field({ label, wide, children }) {
       return h('label', { style: wide ? { ...s.field, ...s.wide } : s.field }, h('span', { style: s.label }, label), children)
     }
@@ -357,12 +403,23 @@ window.__ModuleLoader__.load({
       const [body, setBody] = useState('')
       const [from, setFrom] = useState('')
       const [root, setRoot] = useState((snapshot && snapshot.installRoot) || '')
+      const [status, track] = useActionStatus()
+      const [message, setMessage] = useState('')
       const scanned = targets.some(target => target.dir === root && target.scanned)
-      const submit = () => {
+      const submit = async () => {
         const payload = { root: root.trim() || undefined }
-        if (from.trim()) return onInstall({ ...payload, op: 'install', from: from.trim(), name: name.trim() || undefined })
-        return onInstall({ ...payload, op: 'install', name: name.trim(), description: description.trim(), body })
+        const body_ = from.trim()
+          ? { ...payload, op: 'install', from: from.trim(), name: name.trim() || undefined }
+          : { ...payload, op: 'install', name: name.trim(), description: description.trim(), body }
+        const result = await track(() => onInstall(body_))
+        if (result && result.ok) {
+          const installed = result.payload && result.payload.result ? result.payload.result : {}
+          setMessage(`已安装 ${installed.installed || name.trim()} → ${installed.path || root}`)
+        } else {
+          setMessage((result && result.error) || '安装失败')
+        }
       }
+      const label = status === 'busy' ? '安装中…' : status === 'ok' ? '✓ 安装成功' : status === 'error' ? '✗ 安装失败' : '安装 skill'
       return h(
         'div',
         { style: s.form },
@@ -401,7 +458,12 @@ window.__ModuleLoader__.load({
           { label: '正文（Markdown，可留空）', wide: true },
           h('textarea', { value: body, onChange: e => setBody(e.target.value), style: s.textarea, placeholder: '# 步骤…' }),
         ),
-        h('div', { style: { ...s.wide, display: 'flex', justifyContent: 'flex-end' } }, h(Button, { kind: 'primary', busy, onClick: submit }, '安装 skill')),
+        h(
+          'div',
+          { style: { ...s.wide, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px' } },
+          h(StatusLine, { status, message }),
+          h(Button, { kind: 'primary', busy: busy || status === 'busy', onClick: submit }, label),
+        ),
       )
     }
 
@@ -493,9 +555,23 @@ window.__ModuleLoader__.load({
     function DropZone({ busy, snapshot, onImport }) {
       const [dragging, setDragging] = useState(false)
       const [reading, setReading] = useState('')
+      const [status, track] = useActionStatus()
+      const [message, setMessage] = useState('')
       const fileInput = useRef(null)
       const dirInput = useRef(null)
       const root = (snapshot && snapshot.installRoot) || ''
+
+      const upload = useCallback(async payload => {
+        const result = await track(() => onImport(payload))
+        const installed = result && result.ok && result.payload && result.payload.result ? result.payload.result : null
+        if (installed) {
+          const count = Array.isArray(installed.files) ? installed.files.length : 0
+          setMessage(`已导入 ${installed.installed}（${count} 个文件）→ ${installed.path}`)
+        } else {
+          setMessage((result && result.error) || '导入失败')
+        }
+        return result
+      }, [onImport, track])
 
       const handleFiles = useCallback(async entries => {
         if (!entries || entries.length === 0) return
@@ -506,7 +582,7 @@ window.__ModuleLoader__.load({
             const buffer = await zips[0].file.arrayBuffer()
             if (buffer.byteLength > 12 * 1024 * 1024) throw new Error('zip 超过 12 MB 上限')
             setReading(`解析 ${zips[0].path}`)
-            await onImport({ op: 'import', zip: toBase64(new Uint8Array(buffer)), root })
+            await upload({ op: 'import', zip: toBase64(new Uint8Array(buffer)), root })
           } else if (zips.length > 0) {
             throw new Error('一次只支持拖入一个 zip，或拖入文件夹')
           } else {
@@ -520,14 +596,14 @@ window.__ModuleLoader__.load({
               files.push(payload)
             }
             setReading(`上传 ${files.length} 个文件`)
-            await onImport({ op: 'import', files, root })
+            await upload({ op: 'import', files, root })
           }
         } catch (cause) {
-          throw cause
+          setMessage(String((cause && cause.message) || cause))
         } finally {
           setReading('')
         }
-      }, [onImport, root])
+      }, [root, upload])
 
       const onDrop = useCallback(async event => {
         event.preventDefault()
@@ -592,6 +668,7 @@ window.__ModuleLoader__.load({
           h(Button, { busy: Boolean(busy || reading), onClick: () => fileInput.current && fileInput.current.click() }, '选择文件 / zip'),
         ),
         reading ? h('div', { style: { color: colors.brand } }, reading) : null,
+        h(StatusLine, { status, message }),
         h('input', { ...inputProps, accept: '.zip,.md,.markdown,.txt', ref: fileInput }),
         h('input', { ...inputProps, webkitdirectory: '', directory: '', ref: dirInput }),
       )
@@ -731,7 +808,9 @@ window.__ModuleLoader__.load({
       const [args, setArgs] = useState('')
       const [url, setUrl] = useState('')
       const [env, setEnv] = useState('')
-      const submit = () => {
+      const [status, track] = useActionStatus()
+      const [message, setMessage] = useState('')
+      const submit = async () => {
         const payload = { domain: 'mcp', op: 'add', serverName: serverName.trim(), transport, env }
         if (transport === 'stdio') {
           payload.command = command.trim()
@@ -739,7 +818,14 @@ window.__ModuleLoader__.load({
         } else {
           payload.url = url.trim()
         }
-        return run(payload)
+        const result = await track(() => run(payload))
+        if (result && result.ok) {
+          const added = result.payload && result.payload.result ? result.payload.result.server : null
+          setMessage(`已添加 ${added ? added.serverName : payload.serverName}${added && added.cwd ? `（工作目录 ${added.cwd}）` : ''}`)
+        } else {
+          setMessage((result && result.error) || '添加失败')
+        }
+        return result
       }
       return h(
         'div',
@@ -764,7 +850,12 @@ window.__ModuleLoader__.load({
         transport === 'stdio'
           ? h(Field, { label: '环境变量（每行 KEY=VALUE）', wide: true }, h('textarea', { value: env, onChange: e => setEnv(e.target.value), style: s.textarea, placeholder: 'GITHUB_TOKEN=xxx' }))
           : null,
-        h('div', { style: { ...s.wide, display: 'flex', justifyContent: 'flex-end' } }, h(Button, { kind: 'primary', busy, onClick: submit }, '安装 MCP 服务器')),
+        h(
+          'div',
+          { style: { ...s.wide, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px' } },
+          h(StatusLine, { status, message }),
+          h(Button, { kind: 'primary', busy: busy || status === 'busy', onClick: submit }, status === 'busy' ? '添加中…' : status === 'ok' ? '✓ 已添加' : status === 'error' ? '✗ 添加失败' : '安装 MCP 服务器'),
+        ),
       )
     }
 
@@ -795,12 +886,93 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- dialog */
 
+    /** Human summary of one completed action, used by the toast. */
+    function describeAction(body, payload) {
+      const result = (payload && payload.result) || {}
+      const op = String((body && body.op) || '')
+      if (body && body.domain === 'skill') {
+        if (op === 'install') return `已安装 skill ${result.installed || body.name} → ${result.path || ''}`
+        if (op === 'import') return `已导入 skill ${result.installed}（${(result.files || []).length} 个文件）`
+        if (op === 'disable') return `已禁用 skill ${result.name}`
+        if (op === 'enable') return `已启用 skill ${result.name}`
+        if (op === 'delete') return `已删除 skill ${result.name}`
+        return 'skill 操作完成'
+      }
+      if (body && body.domain === 'mcp') {
+        if (op === 'add') return `已添加 MCP 服务器 ${result.server && result.server.serverName}`
+        if (op === 'update') return `已更新 MCP 服务器 ${result.server && result.server.serverName}`
+        if (op === 'enable') return `已启用 MCP 服务器 ${result.server && result.server.serverName}`
+        if (op === 'disable') return `已禁用 MCP 服务器 ${result.server && result.server.serverName}`
+        if (op === 'delete') return `已删除 MCP 服务器 ${result.removed && result.removed.serverName}`
+        return 'MCP 操作完成'
+      }
+      return '操作完成'
+    }
+
+    /** Label for the intent alone, used when the action failed and there is no result. */
+    function actionLabel(body) {
+      const op = String((body && body.op) || '')
+      const name = (body && (body.name || body.serverName)) || ''
+      if (body && body.domain === 'skill') {
+        if (op === 'install') return '安装 skill'
+        if (op === 'import') return '导入 skill'
+        if (op === 'disable') return `禁用 skill ${name}`
+        if (op === 'enable') return `启用 skill ${name}`
+        if (op === 'delete') return `删除 skill ${name || (body && body.path) || ''}`
+      }
+      if (body && body.domain === 'mcp') {
+        if (op === 'add') return `添加 MCP 服务器 ${name}`
+        if (op === 'update') return `更新 MCP 服务器 ${name}`
+        if (op === 'enable') return `启用 MCP 服务器 ${name}`
+        if (op === 'disable') return `禁用 MCP 服务器 ${name}`
+        if (op === 'delete') return `删除 MCP 服务器 ${name}`
+      }
+      return '操作'
+    }
+
+    function Toast({ toast, onDismiss }) {
+      if (!toast) return null
+      const tone = toast.kind === 'ok' ? colors.success : colors.danger
+      return h(
+        'div',
+        {
+          role: 'status',
+          'aria-live': 'polite',
+          style: {
+            position: 'absolute',
+            top: '58px',
+            right: '18px',
+            maxWidth: '70%',
+            zIndex: 2147483000,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '8px',
+            padding: '8px 12px',
+            borderRadius: '9px',
+            border: `1px solid ${tone}`,
+            color: tone,
+            background: colors.layer1,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+            fontSize: '12px',
+          },
+        },
+        h('span', { 'aria-hidden': true }, toast.kind === 'ok' ? '✓' : '✗'),
+        h('span', { style: { whiteSpace: 'pre-wrap' } }, toast.text),
+        h(
+          'button',
+          { type: 'button', onClick: onDismiss, style: { border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', padding: '0 2px', font: 'inherit' }, 'aria-label': '关闭提示' },
+          '×',
+        ),
+      )
+    }
+
     function ManagerDialog() {
       const [isOpen] = useOpen()
       const [tab, setTab] = useState('skills')
       const [snapshot, setSnapshot] = useState(null)
       const [error, setError] = useState('')
       const [notice, setNotice] = useState('')
+      const [toast, setToast] = useState(null)
       const [busy, setBusy] = useState(false)
       const cardRef = useRef(null)
 
@@ -839,13 +1011,24 @@ window.__ModuleLoader__.load({
           }
           if (payload && payload.skills && payload.mcp) setSnapshot(payload)
           else await load()
+          setToast({ kind: 'ok', text: describeAction(body, payload), at: Date.now() })
+          return { ok: true, payload }
         } catch (cause) {
-          setError(String((cause && cause.message) || cause))
+          const message = String((cause && cause.message) || cause)
+          setError(message)
+          setToast({ kind: 'error', text: `${actionLabel(body)} 失败：${message}`, at: Date.now() })
           await load()
+          return { ok: false, error: message }
         } finally {
           setBusy(false)
         }
       }, [load])
+
+      useEffect(() => {
+        if (!toast) return undefined
+        const timer = setTimeout(() => setToast(null), 6000)
+        return () => clearTimeout(timer)
+      }, [toast])
 
       const install = useCallback(body => run({ domain: 'skill', ...body }), [run])
 
@@ -861,6 +1044,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: s.card, ref: cardRef, role: 'dialog', 'aria-label': TITLE },
+          h(Toast, { toast, onDismiss: () => setToast(null) }),
           h(
             'div',
             { style: s.header },

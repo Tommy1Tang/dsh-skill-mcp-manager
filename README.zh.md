@@ -45,6 +45,18 @@
 - 目标已存在时要显式覆盖（面板走同一接口时由后端拒绝并回传原因）。
 - 也可以不经拖放：虚线框里的「选择文件夹」「选择文件 / zip」按钮走同一套逻辑。
 
+### 操作反馈
+
+每次点击都有三层回应，不用猜：
+
+| 位置 | 内容 |
+|---|---|
+| 按钮本身 | `安装中…` → `✓ 安装成功` / `✗ 安装失败`，4 秒后回到常态 |
+| 按钮左侧的状态行 | `✓ 已安装 my-skill → D:\dsh\skills\my-skill`；失败显示服务端原话（`✗ 非法路径（含 ..）: ../evil.md`） |
+| 对话框右上角 toast | 所有操作共用：成功绿勾、失败红叉加原因，6 秒自动消失，可手动关闭 |
+
+拖放导入同样如此（`已导入 xxx（N 个文件）→ 路径`），MCP 的添加/启停/删除也都有 toast。`description` 缺失这类 warning 仍旧停在黄色提示条里，因为它需要你事后改文件，不该跟着 toast 消失。
+
 ### 把 skill / MCP 放到 D 盘
 
 **skill：为什么不能只改扫描根。** web 组合里全局 `skill-filesystem` 行是 `disabled` 的（见 `packages/bundle/web-app/cordis.patch.yml`），实际发现由 **agent preset** 各自挂载自己的 `skill-filesystem`，profile patch 里给全局行写 `customSkillDirs` 不会生效。所以磁盘位置用目录联接（junction）解决——路径不变，数据在 D 盘：
