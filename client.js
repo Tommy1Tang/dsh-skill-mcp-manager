@@ -20,6 +20,8 @@ window.__ModuleLoader__.load({
     /* ---------------------------------------------------------- open state */
 
     let open = false
+    // A layer inside the dialog that Escape should close first (the detail drawer).
+    let closeTopLayer = null
     const openListeners = new Set()
     function setOpen(next) {
       open = next
@@ -133,7 +135,7 @@ window.__ModuleLoader__.load({
         cursor: 'pointer',
         font: 'inherit',
       }),
-      body: { padding: '14px 18px 18px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '14px' },
+      body: { padding: '14px 18px 18px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '14px', position: 'relative' },
       sectionTitle: {
         display: 'flex',
         alignItems: 'center',
@@ -346,7 +348,7 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- skills */
 
-    function SkillRow({ skill, busy, selected, onSelect, onToggle, onDelete, onPolicy }) {
+    function SkillRow({ skill, busy, selected, onSelect, onToggle, onDelete, onPolicy, onDetail }) {
       const [confirming, setConfirming] = useState(false)
       useEffect(() => {
         if (!confirming) return undefined
@@ -373,7 +375,25 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { style: s.rowName },
-            skill.name,
+            h(
+              'button',
+              {
+                type: 'button',
+                onClick: () => onDetail(skill),
+                title: '打开详情：正文、文件、引用检查',
+                style: {
+                  border: 'none',
+                  background: 'transparent',
+                  padding: 0,
+                  font: 'inherit',
+                  fontWeight: 600,
+                  color: colors.text,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                },
+              },
+              skill.name,
+            ),
             h('span', { style: s.pill(skill.disabled ? 'off' : 'on') }, skill.disabled ? '已禁用' : '启用中'),
             skill.modelVisible === false
               ? h('span', { style: s.pill('warn'), title: skill.modelInvisibleReason || '' }, '模型不可见')
@@ -386,10 +406,13 @@ window.__ModuleLoader__.load({
           skill.modelVisible === false && skill.modelInvisibleReason
             ? h('div', { style: { ...s.label, color: colors.warn } }, `模型不可见：${skill.modelInvisibleReason}`)
             : null,
-          h('div', { style: s.rowPath, title: skill.path }, skill.path),
-          skill.realPath && skill.realPath !== skill.path
-            ? h('div', { style: s.rowPath, title: skill.realPath }, `→ ${skill.realPath}`)
-            : null,
+          h(
+            'div',
+            { style: { ...s.rowPath, direction: 'ltr' }, title: skill.realPath || skill.path },
+            skill.realPath && skill.realPath !== skill.path
+              ? `${skill.path}  →  ${skill.realPath}`
+              : skill.path,
+          ),
         ),
         h(
           'div',
@@ -434,6 +457,7 @@ window.__ModuleLoader__.load({
 
     function InstallSkill({ busy, snapshot, onInstall }) {
       const targets = (snapshot && snapshot.installTargets) || []
+      const projectTargets = (snapshot && snapshot.projectInstallTargets) || []
       const [name, setName] = useState('')
       const [description, setDescription] = useState('')
       const [body, setBody] = useState('')
@@ -442,6 +466,7 @@ window.__ModuleLoader__.load({
       const [status, track] = useActionStatus()
       const [message, setMessage] = useState('')
       const scanned = targets.some(target => target.dir === root && target.scanned)
+        || projectTargets.some(target => target.dir === root)
       const submit = async () => {
         const payload = { root: root.trim() || undefined }
         const body_ = from.trim()
@@ -476,6 +501,25 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
+          projectTargets.length > 0
+            ? h(
+                'div',
+                { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '4px' } },
+                h('span', { style: { ...s.label, alignSelf: 'center' } }, '项目：'),
+                projectTargets.map(target =>
+                  h(
+                    Button,
+                    {
+                      key: target.dir,
+                      title: target.dir,
+                      onClick: () => setRoot(target.dir),
+                    },
+                    `${target.source === 'project-dsh' ? '.dsh' : '.agents'} · ${target.project.split(/[\\/]/).pop()}${target.exists ? '' : ' *'}`,
+                  ),
+                ),
+                h('span', { style: { ...s.label, alignSelf: 'center' } }, '* 目录不存在，安装时创建'),
+              )
+            : null,
           scanned
             ? null
             : h(
@@ -735,9 +779,131 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** Right-hand drawer: what the row cannot show — body, files, references. */
+    function SkillDetailDrawer({ detail, onClose }) {
+      if (!detail) return null
+      const section = (title, content) => h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        h('div', { style: { ...s.label, textTransform: 'uppercase', letterSpacing: '0.04em' } }, title),
+        content,
+      )
+      const lines = (items, empty) => (items && items.length > 0
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, items)
+        : h('div', { style: { ...s.label, color: colors.muted } }, empty))
+      return h(
+        'div',
+        {
+          style: {
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: 'min(560px, 100%)',
+            background: colors.layer1,
+            borderLeft: `1px solid ${colors.borderStrong}`,
+            boxShadow: '-12px 0 32px rgba(0,0,0,0.18)',
+            display: 'flex',
+            flexDirection: 'column',
+            zIndex: 5,
+          },
+        },
+        h(
+          'div',
+          {
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '12px 16px',
+              borderBottom: `1px solid ${colors.border}`,
+            },
+          },
+          h('strong', { style: { fontSize: '13px' } }, detail.name || '详情'),
+          h('div', { style: { marginLeft: 'auto' } }, h(Button, { onClick: onClose }, '关闭')),
+        ),
+        h(
+          'div',
+          { style: { padding: '12px 16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '12px' } },
+          detail.error
+            ? h('div', { style: s.banner('error') }, detail.error)
+            : detail.loading
+              ? h('div', { style: s.banner() }, '读取中…')
+              : h(
+                  React.Fragment,
+                  null,
+                  section(
+                    '状态',
+                    h(
+                      'div',
+                      { style: { display: 'flex', flexDirection: 'column', gap: '2px' } },
+                      h('div', null, detail.disabled ? '已禁用' : '启用中'),
+                      h('div', { style: { color: detail.modelVisible ? colors.muted : colors.warn } }, detail.modelVisible ? '模型可见' : `模型不可见：${detail.modelInvisibleReason || '未知原因'}`),
+                      h('div', { style: { ...s.rowPath, direction: 'ltr' }, title: detail.path }, detail.path),
+                    ),
+                  ),
+                  section(
+                    '引用',
+                    lines(
+                      (detail.references || []).map(ref =>
+                        h('div', { key: ref.name, style: { color: ref.installed ? colors.text : colors.warn } }, `${ref.installed ? '✓' : '✗'} ${ref.name}${ref.installed ? '' : '（未安装）'}`),
+                      ),
+                      '没有检测到跨 skill 引用',
+                    ),
+                  ),
+                  section(
+                    '文件',
+                    lines(
+                      (detail.files || []).map(file =>
+                        h('div', { key: file.path, style: s.rowPath, title: file.path }, `${file.path}  ·  ${file.bytes} B`),
+                      ),
+                      '没有附加文件',
+                    ),
+                  ),
+                  section(
+                    '正文',
+                    h(
+                      'pre',
+                      {
+                        style: {
+                          margin: 0,
+                          padding: '10px',
+                          borderRadius: '8px',
+                          border: `1px solid ${colors.border}`,
+                          background: colors.base,
+                          font: '11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace',
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          maxHeight: '48vh',
+                          overflowY: 'auto',
+                        },
+                      },
+                      detail.body || '（空）',
+                    ),
+                  ),
+                ),
+        ),
+      )
+    }
+
     function SkillsTab({ snapshot, busy, run, install }) {
       const skills = (snapshot && snapshot.skills) || { active: [], disabled: [], roots: [] }
       const [selected, setSelected] = useState(() => new Set())
+      const [query, setQuery] = useState('')
+      const [filters, setFilters] = useState({ state: 'all', visibility: 'all', scope: 'all' })
+      const [detail, setDetail] = useState(null)
+      const [detailBusy, setDetailBusy] = useState(false)
+      const [sort, setSort] = useState('name')
+      // 42 rows of install form is a lot of scrolling; keep it folded once the
+      // list is long, open it by default on a small library.
+      const [showInstall, setShowInstall] = useState((skills.active.length + skills.disabled.length) <= 20)
+      useEffect(() => {
+        if (!detail) return undefined
+        closeTopLayer = () => setDetail(null)
+        return () => {
+          closeTopLayer = null
+        }
+      }, [detail])
       // A machine can register dozens of workspaces; a full root dump would push
       // the list off screen, so the banner shows the first few and counts the rest.
       const rootLines = (skills.roots || []).map(root => `${root.dir}${root.exists ? '' : '（不存在）'}`)
@@ -748,6 +914,85 @@ window.__ModuleLoader__.load({
         ? `项目根：已纳入 ${(snapshot.projectRoots || []).length} 个（工作区注册表 ${snapshot.projectRootsDetected} 个）`
         : ''
       const all = skills.active.concat(skills.disabled)
+      const matches = skill => {
+        const needle = query.trim().toLowerCase()
+        if (needle) {
+          const haystack = `${skill.name} ${skill.description || ''}`.toLowerCase()
+          // A bare word should not match every path; only a path-ish query does.
+          const wantsPath = needle.includes('/') || needle.includes('\\')
+          const path = wantsPath ? String(skill.path).toLowerCase() : ''
+          if (!haystack.includes(needle) && !(path && path.includes(needle))) return false
+        }
+        if (filters.state === 'active' && skill.disabled) return false
+        if (filters.state === 'disabled' && !skill.disabled) return false
+        if (filters.visibility === 'visible' && skill.modelVisible === false) return false
+        if (filters.visibility === 'hidden' && skill.modelVisible !== false) return false
+        const isProject = String(skill.rootSource || '').startsWith('project-')
+        if (filters.scope === 'project' && !isProject) return false
+        if (filters.scope === 'user' && isProject) return false
+        return true
+      }
+      const bySort = (a, b) => (sort === 'mtime'
+        ? (b.mtimeMs || 0) - (a.mtimeMs || 0)
+        : String(a.name).localeCompare(String(b.name)))
+      const visibleActive = skills.active.filter(matches).slice().sort(bySort)
+      const visibleDisabled = skills.disabled.filter(matches).slice().sort(bySort)
+      const openDetail = async skill => {
+        setDetailBusy(true)
+        setDetail({ loading: true, name: skill.name })
+        try {
+          const payload = await request('/action', { method: 'POST', body: JSON.stringify({ domain: 'skill', op: 'detail', name: skill.name }) })
+          setDetail(payload.result)
+        } catch (cause) {
+          setDetail({ name: skill.name, error: String((cause && cause.message) || cause) })
+        } finally {
+          setDetailBusy(false)
+        }
+      }
+      const chip = (groupName, value, label) => {
+        const active = filters[groupName] === value
+        return h(
+          'button',
+          {
+            key: `${groupName}:${value}`,
+            type: 'button',
+            onClick: () => setFilters(previous => ({ ...previous, [groupName]: value })),
+            style: {
+              padding: '3px 9px',
+              borderRadius: '999px',
+              border: `1px solid ${active ? colors.brand : colors.border}`,
+              background: active ? colors.layer2 : 'transparent',
+              color: active ? colors.text : colors.muted,
+              cursor: 'pointer',
+              font: 'inherit',
+              fontSize: '11px',
+            },
+          },
+          label,
+        )
+      }
+      const counts = {
+        active: skills.active.length,
+        disabled: skills.disabled.length,
+        visible: all.filter(skill => skill.modelVisible !== false).length,
+        hidden: all.filter(skill => skill.modelVisible === false).length,
+        user: all.filter(skill => !String(skill.rootSource || '').startsWith('project-')).length,
+        project: all.filter(skill => String(skill.rootSource || '').startsWith('project-')).length,
+      }
+      const group = (label, children) => h(
+        'div',
+        { style: { display: 'flex', gap: '4px', alignItems: 'center' } },
+        h('span', { style: { ...s.label, marginRight: '2px' } }, label),
+        children,
+      )
+      const filtered = visibleActive.concat(visibleDisabled)
+      const allFilteredSelected = filtered.length > 0 && filtered.every(skill => selected.has(skill.name))
+      const toggleAllFiltered = () => setSelected(previous => {
+        const next = new Set(previous)
+        if (allFilteredSelected) filtered.forEach(skill => next.delete(skill.name))
+        else filtered.forEach(skill => next.add(skill.name))
+        return next
+      })
       const names = [...selected].filter(name => all.some(skill => skill.name === name))
       const clearSelection = () => setSelected(new Set())
       const toggleSelected = skill => setSelected(previous => {
@@ -766,6 +1011,7 @@ window.__ModuleLoader__.load({
         busy,
         selected: selected.has(skill.name),
         onSelect: toggleSelected,
+        onDetail: openDetail,
         onToggle: item => run({ domain: 'skill', op: skill.disabled ? 'enable' : 'disable', name: item.name }),
         onDelete: item => run({ domain: 'skill', op: 'delete', name: item.name }),
         onPolicy: (item, modelInvocable) => run({ domain: 'skill', op: 'policy', name: item.name, modelInvocable }),
@@ -776,9 +1022,67 @@ window.__ModuleLoader__.load({
         null,
         h(
           'div',
+          { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+          h(
+            'div',
+            { style: { display: 'flex', gap: '4px', alignItems: 'center', flex: '1 1 260px' } },
+            h(TextInput, {
+              value: query,
+              onChange: event => setQuery(event.target.value),
+              placeholder: '搜索 name / 描述（含 / 或 \\ 时也搜路径）',
+              style: { flex: '1 1 auto' },
+            }),
+            query ? h(Button, { onClick: () => setQuery(''), title: '清除搜索' }, '×') : null,
+          ),
+          h(
+            'select',
+            { value: sort, onChange: event => setSort(event.target.value), style: { ...s.input, flex: '0 0 auto' } },
+            h('option', { value: 'name' }, '按名称'),
+            h('option', { value: 'mtime' }, '按修改时间'),
+          ),
+          h('span', { style: s.label }, `显示 ${visibleActive.length + visibleDisabled.length} / ${all.length}`),
+        ),
+        h(
+          'div',
+          { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'center' } },
+          group('状态', [
+            chip('state', 'all', '全部'),
+            chip('state', 'active', `启用 ${counts.active}`),
+            chip('state', 'disabled', `禁用 ${counts.disabled}`),
+          ]),
+          group('可见性', [
+            chip('visibility', 'all', '全部'),
+            chip('visibility', 'visible', `模型可见 ${counts.visible}`),
+            chip('visibility', 'hidden', `仅手动 ${counts.hidden}`),
+          ]),
+          group('作用域', [
+            chip('scope', 'all', '全部'),
+            chip('scope', 'user', `用户 ${counts.user}`),
+            chip('scope', 'project', `项目 ${counts.project}`),
+          ]),
+        ),
+        h(
+          'div',
           { style: s.sectionTitle },
           '已启用',
-          h('span', { style: s.count }, String(skills.active.length)),
+          h('span', { style: s.count }, String(visibleActive.length)),
+          h(
+            'label',
+            {
+              style: {
+                ...s.label,
+                display: 'flex',
+                gap: '4px',
+                alignItems: 'center',
+                marginLeft: 'auto',
+                textTransform: 'none',
+                letterSpacing: 0,
+                fontWeight: 400,
+              },
+            },
+            h('input', { type: 'checkbox', checked: allFilteredSelected, onChange: toggleAllFiltered }),
+            '全选当前过滤',
+          ),
         ),
         h(BatchBar, {
           count: names.length,
@@ -790,15 +1094,15 @@ window.__ModuleLoader__.load({
             { label: '批量删除', kind: 'danger', onClick: () => runBatch('delete') },
           ],
         }),
-        skills.active.length === 0
-          ? h('div', { style: s.banner() }, '当前扫描根下没有可用 skill。')
-          : h('div', { style: s.list }, skills.active.map(row)),
-        skills.disabled.length > 0
+        visibleActive.length === 0
+          ? h('div', { style: s.banner() }, skills.active.length === 0 ? '当前扫描根下没有可用 skill。' : '没有匹配的已启用 skill。')
+          : h('div', { style: s.list }, visibleActive.map(row)),
+        visibleDisabled.length > 0
           ? h(
               React.Fragment,
               null,
-              h('div', { style: s.sectionTitle }, '已禁用', h('span', { style: s.count }, String(skills.disabled.length))),
-              h('div', { style: s.list }, skills.disabled.map(row)),
+              h('div', { style: s.sectionTitle }, '已禁用', h('span', { style: s.count }, String(visibleDisabled.length))),
+              h('div', { style: s.list }, visibleDisabled.map(row)),
             )
           : null,
         trash.length > 0
@@ -847,16 +1151,27 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
-        h('div', { style: s.sectionTitle }, '安装'),
-        h(DropZone, { busy, snapshot, onImport: install }),
-        h(InstallSkill, { busy, snapshot, onInstall: install }),
-        h(PathDelete, { busy, run }),
+        h(
+          'div',
+          { style: s.sectionTitle },
+          '安装 / 导入',
+          h('span', { style: s.count }, showInstall ? '已展开' : '已收起'),
+          h(
+            'div',
+            { style: { marginLeft: 'auto' } },
+            h(Button, { onClick: () => setShowInstall(value => !value) }, showInstall ? '收起' : '展开'),
+          ),
+        ),
+        showInstall ? h(DropZone, { busy, snapshot, onImport: install }) : null,
+        showInstall ? h(InstallSkill, { busy, snapshot, onInstall: install }) : null,
+        showInstall ? h(PathDelete, { busy, run }) : null,
         h(
           'div',
           { style: s.banner(), title: rootLines.join('\n') },
           `扫描根：${rootSummary}`,
           projectSummary ? `  ·  ${projectSummary}` : '',
         ),
+        detail ? h(SkillDetailDrawer, { detail, onClose: () => setDetail(null) }) : null,
       )
     }
 
@@ -980,6 +1295,90 @@ window.__ModuleLoader__.load({
      * name is locked while editing because the state file is keyed by it —
      * renaming is a delete plus an add.
      */
+    /** Parse `KEY=VALUE` lines into editor rows, recognising `!!js process.env.X`. */
+    function parseRows(text) {
+      const rows = []
+      for (const line of String(text || '').split(/\r?\n/)) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        const index = trimmed.indexOf('=')
+        if (index === -1) continue
+        const key = trimmed.slice(0, index).trim()
+        const value = trimmed.slice(index + 1).trim()
+        const ref = /^!!js\s+process\.env\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(value)
+        rows.push(ref ? { key, value: '', ref: ref[1] } : { key, value, ref: '' })
+      }
+      return rows
+    }
+
+    function rowsToText(rows) {
+      return rows
+        .filter(row => String(row.key).trim())
+        .map(row => (row.ref ? `${String(row.key).trim()}=!!js process.env.${row.ref}` : `${String(row.key).trim()}=${row.value}`))
+        .join('\n')
+    }
+
+    /**
+     * Key/value rows with a per-value "read from environment" switch.
+     *
+     * A checked row serialises to `KEY=!!js process.env.NAME`, which the Host
+     * renders as a live loader expression instead of a quoted literal — the
+     * secret stays in the environment and never lands in the patch file.
+     */
+    function KeyValueEditor({ label, text, onChange, placeholderKey, placeholderValue }) {
+      const [rows, setRows] = useState(() => parseRows(text))
+      const update = next => {
+        setRows(next)
+        onChange(rowsToText(next))
+      }
+      return h(
+        'div',
+        { style: { ...s.field, ...s.wide } },
+        h('span', { style: s.label }, label),
+        h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          rows.map((row, index) =>
+            h(
+              'div',
+              { key: `row-${index}`, style: { display: 'flex', gap: '4px', alignItems: 'center' } },
+              h(TextInput, {
+                value: row.key,
+                placeholder: placeholderKey,
+                style: { flex: '0 0 140px' },
+                onChange: event => update(rows.map((item, position) => position === index ? { ...item, key: event.target.value } : item)),
+              }),
+              h(TextInput, {
+                value: row.ref ? row.ref : row.value,
+                placeholder: row.ref ? '环境变量名' : placeholderValue,
+                style: { flex: '1 1 auto' },
+                onChange: event => update(rows.map((item, position) => position === index
+                  ? (item.ref ? { ...item, ref: event.target.value } : { ...item, value: event.target.value })
+                  : item)),
+              }),
+              h(
+                'label',
+                {
+                  style: { ...s.label, display: 'flex', gap: '3px', alignItems: 'center', whiteSpace: 'nowrap' },
+                  title: '从环境变量读取：写入 !!js process.env.<名字>',
+                },
+                h('input', {
+                  type: 'checkbox',
+                  checked: Boolean(row.ref),
+                  onChange: event => update(rows.map((item, position) => position === index
+                    ? (event.target.checked ? { ...item, ref: item.value || 'VAR_NAME', value: '' } : { ...item, value: item.ref, ref: '' })
+                    : item)),
+                }),
+                '环境变量',
+              ),
+              h(Button, { onClick: () => update(rows.filter((_, position) => position !== index)) }, '×'),
+            ),
+          ),
+          h(Button, { onClick: () => update([...rows, { key: '', value: '', ref: '' }]) }, '添加一行'),
+        ),
+      )
+    }
+
     function McpForm({ busy, run, editing, onDone, onCancel }) {
       const initial = serverToForm(editing)
       const [serverName, setServerName] = useState(initial.serverName)
@@ -1049,12 +1448,14 @@ window.__ModuleLoader__.load({
           : h(Field, { label: 'URL' }, h(TextInput, { value: url, onChange: e => setUrl(e.target.value), placeholder: 'http://127.0.0.1:3000/mcp' })),
         transport === 'stdio'
           ? h(Field, { label: '参数（每行一个）' }, h('textarea', { value: args, onChange: e => setArgs(e.target.value), style: s.textarea, placeholder: '-y\n@modelcontextprotocol/server-github' }))
-          : h(Field, { label: 'Headers（每行 KEY=VALUE）' }, h('textarea', { value: headers, onChange: e => setHeaders(e.target.value), style: s.textarea, placeholder: 'Authorization=Bearer xxx' })),
-        h(
-          Field,
-          { label: '环境变量（stdio 传输才会用到；每行 KEY=VALUE）', wide: true },
-          h('textarea', { value: env, onChange: e => setEnv(e.target.value), style: s.textarea, placeholder: 'GITHUB_TOKEN=xxx' }),
-        ),
+          : h(KeyValueEditor, { label: 'Headers', text: headers, onChange: setHeaders, placeholderKey: 'Header', placeholderValue: '值' }),
+        h(KeyValueEditor, {
+          label: '环境变量（stdio 传输才会用到）',
+          text: env,
+          onChange: setEnv,
+          placeholderKey: 'KEY',
+          placeholderValue: 'VALUE',
+        }),
         h(
           'div',
           { style: { ...s.wide, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px' } },
@@ -1098,7 +1499,12 @@ window.__ModuleLoader__.load({
               `状态与 patch 不一致：状态期望 [${expected.join(', ') || '空'}]，patch 受管段落里是 [${(mcp.blockServers || []).join(', ') || '空'}]。对任一服务器做一次启用/禁用即可重写段落。`,
             )
           : null,
-        h('div', { style: s.sectionTitle }, '服务器', h('span', { style: s.count }, String(mcp.servers.length))),
+        h(
+          'div',
+          { style: s.sectionTitle },
+          '服务器',
+          h('span', { style: s.count }, `${mcp.servers.filter(server => server.status === 'connected').length} 已连接 / ${mcp.servers.length}`),
+        ),
         h(BatchBar, {
           count: names.length,
           busy,
@@ -1265,8 +1671,29 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (!isOpen) return undefined
         void load()
+        if (cardRef.current) cardRef.current.focus()
         const onKey = event => {
-          if (event.key === 'Escape') setOpen(false)
+          if (event.key === 'Tab' && cardRef.current) {
+            const focusable = cardRef.current.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')
+            if (focusable.length > 0) {
+              const first = focusable[0]
+              const last = focusable[focusable.length - 1]
+              if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault()
+                first.focus()
+              } else if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault()
+                last.focus()
+              }
+            }
+            return
+          }
+          if (event.key !== 'Escape') return
+          if (closeTopLayer) {
+            closeTopLayer()
+            return
+          }
+          setOpen(false)
         }
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
@@ -1319,7 +1746,7 @@ window.__ModuleLoader__.load({
         },
         h(
           'div',
-          { style: s.card, ref: cardRef, role: 'dialog', 'aria-label': TITLE },
+          { style: { ...s.card, outline: 'none' }, ref: cardRef, role: 'dialog', 'aria-modal': 'true', tabIndex: -1, 'aria-label': TITLE },
           h(Toast, { toast, onDismiss: () => setToast(null) }),
           h(
             'div',

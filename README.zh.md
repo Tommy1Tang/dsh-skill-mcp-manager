@@ -26,6 +26,9 @@
 | 禁用 | 把条目移进同根的 `.disabled/`（该目录不在发现深度内，skill 立刻从目录消失） |
 | 启用 | 从 `.disabled/` 移回根目录 |
 | 策略 | 改 frontmatter 里的 `disable-model-invocation`：面板上的「仅手动 / 允许模型调用」就是把这一行加上或删掉（只动这一行，正文和其它键原样保留） |
+| 详情 | 右侧抽屉：状态与原因、正文（前 20000 字符）、文件清单、**跨 skill 引用检查**（`Skill tool with "x"` / `skill: x`，标出未安装的目标） |
+| 搜索 | 顶部搜索框匹配 name / 描述（查询里带 `/` 或 `\` 时才搜路径）；三组带计数的 chips 过滤：启用态、可见性（模型可见 / 仅手动）、作用域（用户 / 项目）；可切按名称 / 修改时间排序，支持「全选当前过滤」 |
+| 排版 | 安装 / 导入区在 skill 超过 20 个时默认收起；路径压成一行（`原始 → 真实`）；点名字直接开详情；Esc 先关抽屉再关面板，Tab 焦点锁在对话框内 |
 | 删除 | 移进同根 `.trash/`，不再直接抹掉；`.trash/index.json` 记下原路径，所以「恢复」能把它放回原位置（含原本处于 `.disabled/` 的情况）；「彻底删除」才真正 `rm` |
 | 批量 | 勾选多行后一次启用 / 禁用 / 删除；逐项返回结果，失败的条目单独报原因，不影响其余条目 |
 
@@ -110,7 +113,7 @@ junction 对 Node 完全透明：provider 照常 `readdir`、chokidar 照常监�
     projectRoots: []        # 可选：显式补充项目根，如 ['D:\AI_RPG_engine']
 ```
 
-单次覆盖：安装表单里的「安装地址」；不在扫描根里的目录会标黄并说明「文件写进去了但不会被加载」。
+单次覆盖：安装表单里的「安装地址」；不在扫描根里的目录会标黄并说明「文件写进去了但不会被加载」。表单下面还有一排项目快捷按钮——每个已登记项目贡献 `.dsh/skills` 与 `.agents/skills` 两个目标，目录不存在时标 `*`，安装时自动创建。
 
 **MCP：没有"安装目录"，只有工作目录与缓存。** stdio 服务器是一条被 spawn 的命令，所以"装到 D 盘"= 给它一个 D 盘上的 `cwd`，并把 npm/pnpm 的缓存指到 D 盘。管理器在 `add` 时自动做这三件事：
 
@@ -129,6 +132,8 @@ junction 对 Node 完全透明：provider 照常 `readdir`、chokidar 照常监�
 ```
 
 `<mcpRoot>` 由 `mcpRoot` 配置决定，缺省 `$DSH_HOME/mcp`。自己给 `cwd`/`env` 的，管理器不覆盖。
+
+**密钥不用写进 patch。** 表单里每个 env / header 值旁边有「环境变量」开关：勾上后填变量名，管理器写入 `KEY: !!js process.env.NAME`（loader 表达式，不是字符串），密钥留在宿主的 shell 环境里，`state.json` 与 `cordis.patch.yml` 里都只有变量名。读回来时表达式会被还原成开关状态。
 
 仓库里带了一个零依赖示例服务器 [`examples/demo-local/server.mjs`](examples/demo-local/server.mjs)（`ping` / `where` 两个工具，`where` 返回自己的工作目录）。运行时副本放在 `D:\dsh\mcp\demo-local\server.mjs`，已作为 `demo-local` 注册在面板里，可直接验证「进程在 D 盘、DSH 正常调用」。
 
@@ -177,10 +182,11 @@ POST /skill-mcp-manager/action
 { "domain": "skill", "op": "enable",  "name": "my-skill" }
 { "domain": "skill", "op": "delete",  "name": "my-skill" }
 { "domain": "skill", "op": "delete",  "path": "D:\\skills\\my-skill" }
-// 回收站 / 策略 / 批量
+// 回收站 / 策略 / 详情 / 批量
 { "domain": "skill", "op": "restore", "id": "m3k2abc-trash-me" }
 { "domain": "skill", "op": "purge",   "id": "m3k2abc-trash-me" }
 { "domain": "skill", "op": "policy",  "name": "grill-me", "modelInvocable": true }
+{ "domain": "skill", "op": "detail",  "name": "grill-me" }
 { "domain": "skill", "op": "batch",   "action": "disable", "names": ["a-skill", "b-skill"] }
 
 // 安装 MCP 服务器
@@ -220,11 +226,11 @@ POST /skill-mcp-manager/action
 ## 测试
 
 ```powershell
-npm test     # node --test，40 个用例，零第三方依赖
+npm test     # node --test，45 个用例，零第三方依赖
 ```
 
-- `test/units.test.mjs`：直接打 `lib/index.js` 暴露的 `__test__` 纯函数 —— BOM 剥离、frontmatter 解析/补齐/策略改写、条目路径规范化、zip 解析（store + deflate）、外层剥壳、删除护栏、根序与项目根、受管段落解析与结构检查。
-- `test/http.test.mjs`：假 `webServer` 收路由 + 真 `node:http` 发请求，走完整接口 —— 导入（含 BOM 包与 >256 KB 的包）、body 上限、跨站写请求被 403、删除护栏、回收站与恢复/彻底删除、策略开关、批量操作逐项结果、skill 启停、项目根扫描与「项目」标记、MCP 增删启停与 `update`（含 headers）、连接状态（fake tools 服务）、批量、patch 备份与外来行保留、state/patch 漂移、按 profile 隔离的 state。
+- `test/units.test.mjs`：直接打 `lib/index.js` 暴露的 `__test__` 纯函数 —— BOM 剥离、frontmatter 解析/补齐/策略改写、条目路径规范化、zip 解析（store + deflate）、外层剥壳、删除护栏、根序与项目根、别名折叠、受管段落解析与结构检查。
+- `test/http.test.mjs`：假 `webServer` 收路由 + 真 `node:http` 发请求，走完整接口 —— 导入（含 BOM 包与 >256 KB 的包）、body 上限、跨站写请求被 403、删除护栏、回收站与恢复/彻底删除、策略开关、详情（正文/文件/引用）、批量操作逐项结果、skill 启停、项目根扫描与「项目」标记、项目安装目标（不存在也能装）、MCP 增删启停与 `update`（含 headers）、连接状态（fake tools 服务）、批量、patch 备份与外来行保留、`!!js` 密钥表达式不加引号、state/patch 漂移、按 profile 隔离的 state、junction 别名去重。
 - `test-support/zip.mjs`：自带的极简 zip 写入器，用来造夹具，不参与测试发现。
 
 ## 卸载

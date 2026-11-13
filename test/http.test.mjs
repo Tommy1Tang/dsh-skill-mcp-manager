@@ -645,6 +645,75 @@ test('a junction alias does not duplicate listings or trash entries', async () =
   }
 })
 
+test('detail returns the body, files, and resolved references', async () => {
+  const root = config.customSkillDirs[0]
+  const zip = makeZip([
+    {
+      path: 'detail-skill/SKILL.md',
+      data: '---\nname: detail-skill\ndescription: Detail check.\n---\n\nCall the Skill tool with "missing-skill".\n',
+    },
+    { path: 'detail-skill/notes.md', data: 'notes\n' },
+  ])
+  await act({ domain: 'skill', op: 'import', zip: zip.toString('base64'), root })
+
+  const detail = await act({ domain: 'skill', op: 'detail', name: 'detail-skill' })
+  assert.equal(detail.status, 200)
+  const result = detail.body.result
+  assert.match(result.body, /Call the Skill tool with "missing-skill"/)
+  assert.ok(result.files.some(file => file.path === 'SKILL.md'))
+  assert.ok(result.files.some(file => file.path === 'notes.md'))
+  const ref = result.references.find(item => item.name === 'missing-skill')
+  assert.equal(ref.installed, false)
+
+  const missing = await act({ domain: 'skill', op: 'detail', name: 'nope' })
+  assert.equal(missing.status, 400)
+  await act({ domain: 'skill', op: 'delete', name: 'detail-skill' })
+})
+
+test('the snapshot offers project install targets even before they exist', async () => {
+  const projectDir = join(sandbox, 'project-targets')
+  workspaceRegistry = { list: () => [{ path: projectDir }] }
+  try {
+    const { body } = await getState()
+    const targets = body.projectInstallTargets
+    assert.ok(targets.some(target => target.dir === join(projectDir, '.dsh', 'skills') && target.exists === false))
+    assert.ok(targets.some(target => target.dir === join(projectDir, '.agents', 'skills') && target.exists === false))
+
+    const installed = await act({
+      domain: 'skill',
+      op: 'install',
+      name: 'project-born-skill',
+      description: 'Installed into a project root.',
+      root: join(projectDir, '.dsh', 'skills'),
+    })
+    assert.equal(installed.status, 200)
+    assert.equal(installed.body.result.scanned, true)
+    assert.ok((await fs.stat(join(projectDir, '.dsh', 'skills', 'project-born-skill', 'SKILL.md'))).isFile())
+
+    const after = await getState()
+    assert.ok(after.body.projectInstallTargets.some(target => target.dir === join(projectDir, '.dsh', 'skills') && target.exists === true))
+    await act({ domain: 'skill', op: 'delete', name: 'project-born-skill' })
+  } finally {
+    workspaceRegistry = null
+  }
+})
+
+test('env values written as loader expressions stay unquoted in the patch', async () => {
+  await act({
+    domain: 'mcp',
+    op: 'add',
+    serverName: 'secret-mcp',
+    transport: 'stdio',
+    command: 'node',
+    env: 'TOKEN=!!js process.env.MCP_TOKEN\nPLAIN=hello',
+  })
+  const patch = await readPatch()
+  assert.match(patch, /TOKEN: !!js process\.env\.MCP_TOKEN/)
+  assert.ok(!patch.includes("'!!js process.env.MCP_TOKEN'"), 'a loader expression must not be quoted')
+  assert.match(patch, /PLAIN: 'hello'/)
+  await act({ domain: 'mcp', op: 'delete', serverName: 'secret-mcp' })
+})
+
 test('unknown domains and operations answer 400 with a reason', async () => {
   const noDomain = await act({ op: 'nope' })
   assert.equal(noDomain.status, 400)
