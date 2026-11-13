@@ -1,5 +1,7 @@
 # dsh-skill-mcp-manager
 
+[![tests](https://github.com/Tommy1Tang/dsh-skill-mcp-manager/actions/workflows/test.yml/badge.svg)](https://github.com/Tommy1Tang/dsh-skill-mcp-manager/actions/workflows/test.yml)
+
 一个面板管两件事：**本地 skill** 和 **MCP 服务器**。安装、启用、禁用、删除都在同一处。
 
 > English: [README.md](README.md)

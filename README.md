@@ -1,5 +1,7 @@
 # dsh-skill-mcp-manager
 
+[![tests](https://github.com/Tommy1Tang/dsh-skill-mcp-manager/actions/workflows/test.yml/badge.svg)](https://github.com/Tommy1Tang/dsh-skill-mcp-manager/actions/workflows/test.yml)
+
 A panel inside **DeepSeek Harness (DSH)** that manages local skills and MCP servers in one place: search, inspect, install, enable/disable, batch operations, undoable deletion, and an honest connection status.
 
 > 中文文档：[README.zh.md](README.zh.md)
