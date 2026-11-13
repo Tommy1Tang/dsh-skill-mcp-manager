@@ -104,6 +104,8 @@ test('GET /state reports roots, install target, and patch location', async () =>
   const { status, body } = await getState()
   assert.equal(status, 200)
   assert.equal(body.ok, true)
+  const manifest = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(body.build, `v${manifest.version}`, 'the build string follows the manifest')
   assert.equal(body.installRoot, config.installRoot)
   assert.equal(body.mcpRoot, config.mcpRoot)
   assert.equal(body.mcp.patchPath, patchFile)
